@@ -1,3 +1,4 @@
+use fs2::FileExt;
 use itertools::Itertools;
 use std::borrow::Cow;
 use std::fs;

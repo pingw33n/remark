@@ -1,4 +1,5 @@
 pub mod atomic;
+pub mod file_mutex;
 pub mod varint;
 
 use std::fmt;
