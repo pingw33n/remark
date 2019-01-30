@@ -104,15 +104,15 @@ impl Mode {
     }
 }
 
-struct Inner<K: Field> {
+struct Inner<K: Field, V: Field> {
     len_bytes: usize,
     capacity_bytes: usize,
     preallocate_bytes: usize,
     max_capacity_bytes: usize,
-    max_key: Option<K>,
+    _ty: PhantomData<(K, V)>,
 }
 
-impl<K: Field> Inner<K> {
+impl<K: Field, V: Field> Inner<K, V> {
     unsafe fn free_buf<'a>(&mut self, mmap: &'a Option<MmapMut>) -> Option<&'a mut [u8]> {
         mmap.as_ref()
             .map(|m| &m[self.len_bytes..])
@@ -145,17 +145,52 @@ impl<K: Field> Inner<K> {
         }
         Ok(())
     }
+
+    fn last_entry(&self, mmap: &Option<MmapMut>) -> Option<(K, V)> {
+        let buf = if self.len_bytes > 0 {
+            self.used_buf(mmap).map(|b| &b[self.len_bytes - Index::<K, V>::ENTRY_LEN..])
+        } else {
+            None
+        };
+
+        buf.map(Index::<K, V>::decode_entry)
+    }
 }
 
-pub struct Index<K: Field, V: Field> {
+mod sealed { pub trait Sealed {} }
+
+pub trait DupPolicy: sealed::Sealed {
+    #[doc(hidden)]
+    const __DUP_IGNORED: bool;
+}
+
+pub struct DupIgnored(());
+
+impl DupPolicy for DupIgnored {
+    #[doc(hidden)]
+    const __DUP_IGNORED: bool = true;
+}
+
+impl sealed::Sealed for DupIgnored {}
+
+pub struct DupNotAllowed(());
+
+impl DupPolicy for DupNotAllowed {
+    #[doc(hidden)]
+    const __DUP_IGNORED: bool = false;
+}
+
+impl sealed::Sealed for DupNotAllowed {}
+
+pub struct Index<K: Field, V: Field, KP: DupPolicy = DupNotAllowed> {
     path: PathBuf,
     file: File,
     mmap: Option<MmapMut>,
-    inner: Mutex<Inner<K>>,
-    _ty: PhantomData<V>,
+    inner: Mutex<Inner<K, V>>,
+    _ty: PhantomData<KP>,
 }
 
-impl<K: Field, V: Field> Index<K, V> {
+impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
     const ENTRY_LEN: usize = K::LEN + V::LEN;
 
     pub fn open_or_create(path: impl AsRef<Path>, mode: Mode) -> Result<Self> {
@@ -203,12 +238,6 @@ impl<K: Field, V: Field> Index<K, V> {
 
         let mmap = Self::mmap(&file, max_capacity_bytes).context(Error::Io)?;
 
-        let max_key = if len_bytes > 0 {
-            Some(Self::decode_key(&mmap.as_ref().unwrap()[len_bytes - Self::ENTRY_LEN..]))
-        } else {
-            None
-        };
-
         Ok(Self {
             path,
             file,
@@ -218,7 +247,7 @@ impl<K: Field, V: Field> Index<K, V> {
                 capacity_bytes,
                 preallocate_bytes,
                 max_capacity_bytes,
-                max_key,
+                _ty: PhantomData,
             }),
             _ty: PhantomData,
         })
@@ -236,25 +265,16 @@ impl<K: Field, V: Field> Index<K, V> {
         self.inner.lock().capacity_bytes / Self::ENTRY_LEN
     }
 
+    pub fn max_capacity(&self) -> usize {
+        self.inner.lock().max_capacity_bytes / Self::ENTRY_LEN
+    }
+
     pub fn len(&self) -> usize {
         self.inner.lock().len_bytes / Self::ENTRY_LEN
     }
 
-    pub fn max_key(&self) -> Option<K> {
-        self.inner.lock().max_key
-    }
-
     pub fn last_entry(&self) -> Option<(K, V)> {
-        let buf = {
-            let inner = self.inner.lock();
-            if inner.len_bytes > 0 {
-                inner.used_buf(&self.mmap).map(|b| &b[inner.len_bytes - Self::ENTRY_LEN..])
-            } else {
-                None
-            }
-        };
-
-        buf.map(Self::decode_entry)
+        self.inner.lock().last_entry(&self.mmap)
     }
 
     pub fn last_value(&self) -> Option<V> {
@@ -301,25 +321,15 @@ impl<K: Field, V: Field> Index<K, V> {
     pub fn push(&self, key: K, value: V) -> Result<()> {
         let mut inner = self.inner.lock();
         inner.ensure_capacity(&self.file)?;
-        if let Some(max_key) = inner.max_key {
-            match key.cmp(&max_key) {
-                Ordering::Less => return Err(Error::PushMisordered.into()),
-                Ordering::Equal => if self.last_value().as_ref() == Some(&value) {
-                    // Ignore duplicate entry.
-                    return Ok(());
-                } else {
-                    return Err(Error::PushMisordered.into());
-                }
-                Ordering::Greater => {}
-            }
-
+        if let Some((last_key, last_value)) = inner.last_entry(&self.mmap) {
+            Self::check_dup::<_, KP>(key, last_key)?;
+            Self::check_dup::<_, DupNotAllowed>(value, last_value)?;
         }
 
         let buf = unsafe { inner.free_buf(&self.mmap) }.unwrap();
         Self::encode_entry(buf, key, value);
 
         inner.len_bytes += Self::ENTRY_LEN;
-        inner.max_key = Some(key);
 
         Ok(())
     }
@@ -350,8 +360,6 @@ impl<K: Field, V: Field> Index<K, V> {
             }.context(Error::Io)?)
         })
     }
-
-
 
     fn binary_search(buf: &[u8], f: impl Fn(&[u8]) -> Ordering) -> StdResult<usize, usize> {
         debug_assert!(buf.len() % Self::ENTRY_LEN == 0);
@@ -400,9 +408,21 @@ impl<K: Field, V: Field> Index<K, V> {
         key.encode(&mut entry[..K::LEN]);
         value.encode(&mut entry[K::LEN..]);
     }
+
+    fn check_dup<T: Field, P: DupPolicy>(new: T, last: T) -> Result<()> {
+        match new.cmp(&last) {
+            Ordering::Less => Err(Error::PushMisordered.into()),
+            Ordering::Equal => if KP::__DUP_IGNORED && new == last {
+                Ok(())
+            } else {
+                Err(Error::PushMisordered.into())
+            }
+            Ordering::Greater => Ok(()),
+        }
+    }
 }
 
-impl<K: Field, V: Field> Drop for Index<K, V> {
+impl<K: Field, V: Field, KP: DupPolicy> Drop for Index<K, V, KP> {
     fn drop(&mut self) {
         let _ = self.shrink_to_fit()
             .map_err(|e| error!("[{:?}] error compacting index: {:?}",
@@ -443,7 +463,7 @@ mod test {
 
         let f = mktemp::Temp::new_file().unwrap();
         {
-            let idx = Index::open_or_create(&f, Mode::Growable {
+            let idx: Index<u64, u32> = Index::open_or_create(&f, Mode::Growable {
                 preallocate: PREALLOCATE,
                 max_capacity: MAX_CAPACITY,
             }).unwrap();
@@ -534,5 +554,47 @@ mod test {
                 assert_eq!(idx.push(6, 106).unwrap_err().kind(), &ErrorKind::Index(Error::CantGrow));
             }
         }
+    }
+
+    fn is_push_misordered<T>(r: Result<T>) -> bool {
+        r.err()
+            .map(|e| matches!(e.kind(), ErrorKind::Index(Error::PushMisordered)))
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn push_misorder__key_no_dup() {
+        let f = mktemp::Temp::new_file().unwrap();
+        let mut idx: Index<u32, u64> = Index::open_or_create(&f, Mode::Growable {
+            preallocate: 5,
+            max_capacity: 5,
+        }).unwrap();
+        assert!(idx.push(100, 200).is_ok());
+        assert!(idx.push(101, 201).is_ok());
+        assert!(is_push_misordered(idx.push(101, 201)));
+        assert!(is_push_misordered(idx.push(100, 200)));
+        assert!(is_push_misordered(idx.push(101, 200)));
+        assert!(is_push_misordered(idx.push(100, 201)));
+        assert!(is_push_misordered(idx.push(101, 202)));
+        assert!(is_push_misordered(idx.push(102, 201)));
+        assert_eq!(idx.len(), 2);
+        assert_eq!(idx.entry_by_key(100), Some((100, 200)));
+        assert_eq!(idx.entry_by_key(101), Some((101, 201)));
+    }
+
+    #[test]
+    fn push_misorder__key_dup_ignored() {
+        let f = mktemp::Temp::new_file().unwrap();
+        let mut idx: Index<u64, u32, DupIgnored> = Index::open_or_create(&f, Mode::Growable {
+            preallocate: 5,
+            max_capacity: 5,
+        }).unwrap();
+        assert!(idx.push(100, 200).is_ok());
+        assert!(idx.push(101, 201).is_ok());
+        assert!(idx.push(101, 201).is_ok());
+        assert!(idx.push(101, 202).is_ok());
+        assert!(is_push_misordered(idx.push(101, 200)));
+        assert!(is_push_misordered(idx.push(101, 199)));
+        assert!(is_push_misordered(idx.push(100, 203)));
     }
 }

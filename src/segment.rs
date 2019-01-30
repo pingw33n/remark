@@ -27,6 +27,9 @@ pub const HARD_MAX_SEGMENT_LEN: u32 = u32::max_value() as u32 - 1024;
 const MIN_INDEX_EACH_BYTES: u32 = 1024;
 const MAX_INDEX_EACH_BYTES: u32 = HARD_MAX_SEGMENT_LEN;
 
+pub type IdIndex = Index<u32, u32>;
+pub type TimestampIndex = Index<Timestamp, u32, index::DupIgnored>;
+
 #[derive(Debug, Eq, Fail, PartialEq)]
 pub enum Error {
     #[fail(display = "{}", _0)]
@@ -83,8 +86,8 @@ pub struct Segment {
     base_id: u64,
     next_id: u64,
     min_timestamp: Timestamp,
-    id_index:  Index<u32, u32>,
-    timestamp_index: Index<Timestamp, u32>,
+    id_index:  IdIndex,
+    timestamp_index: TimestampIndex,
 }
 
 impl Segment {
@@ -255,14 +258,11 @@ impl Segment {
         let (start_pos, force_eof) = if end_id > start_id &&
                 start_id >= self.base_id && start_id < self.next_id {
             let local_id = cast::u32(start_id - self.base_id).unwrap();
-            dbg!(local_id);
             (self.id_index.value_by_key(local_id)
                  .unwrap_or(0) as u64, false)
         } else {
             (0, true)
         };
-        dbg!(start_pos);
-        dbg!(force_eof);
         let mut rd: Reader<Arc<SegFile>> = self.file.clone().into();
         rd.set_position(start_pos);
         Iter::new(rd, start_id, end_id, force_eof)
