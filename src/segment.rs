@@ -178,7 +178,6 @@ impl Segment {
             .with_more_context(|_| format!("opening timestamp index file {:?}", timestamp_index_path))?;
 
         let (next_id, min_timestamp) = if let Some((id, pos)) = id_index.last_entry() {
-            let _ = file.writer();
             let ref mut rd = file.reader();
             rd.set_position(pos as u64);
             let ref mut buf = BytesMut::new();
@@ -319,7 +318,7 @@ impl Iter {
         &mut self.buf
     }
 
-    pub fn complete_read_full(&mut self) -> Result<()> {
+    pub fn complete_read(&mut self) -> Result<()> {
         if let Some(frame_len) = self.prolog {
             self.buf.set_len(frame_len);
             let r = self.rd.read_exact(&mut self.buf[format::FRAME_PROLOG_LEN..frame_len - format::FRAME_PROLOG_LEN])
@@ -366,7 +365,6 @@ impl Iterator for Iter {
             }
             break match BufEntry::read_prolog(&mut self.rd, &mut self.buf) {
                 Ok(Some(entry)) => {
-                    dbg!(entry.first_id());
                     let first_id = entry.first_id();
                     if first_id >= self.end_id {
                         self.eof = true;

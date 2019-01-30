@@ -150,7 +150,7 @@ impl BufEntry {
         }))
     }
 
-//    pub fn complete_read_full(&self, rd: &mut impl FileRead, buf: &mut BytesMut) -> Result<()> {
+//    pub fn complete_read(&self, rd: &mut impl FileRead, buf: &mut BytesMut) -> Result<()> {
 //        assert_eq!(buf.len(), format::FRAME_PROLOG_LEN);
 //        buf.set_len(self.frame_len);
 //        rd.read_exact(&mut buf[format::FRAME_PROLOG_LEN..]).context(Error::Io)?;
