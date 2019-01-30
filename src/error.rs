@@ -110,7 +110,7 @@ impl fmt::Display for Error {
     }
 }
 
-#[derive(Debug, Eq, Fail, PartialEq)]
+#[derive(Clone, Debug, Eq, Fail, PartialEq)]
 pub enum ErrorKind {
     #[fail(display = "{}", _0)]
     Entry(crate::entry::Error),

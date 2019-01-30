@@ -30,7 +30,7 @@ const MAX_INDEX_EACH_BYTES: u32 = HARD_MAX_SEGMENT_LEN;
 pub type IdIndex = Index<u32, u32>;
 pub type TimestampIndex = Index<Timestamp, u32, index::DupIgnored>;
 
-#[derive(Debug, Eq, Fail, PartialEq)]
+#[derive(Clone, Debug, Eq, Fail, PartialEq)]
 pub enum Error {
     #[fail(display = "{}", _0)]
     BadPath(Cow<'static, str>),

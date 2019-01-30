@@ -16,7 +16,7 @@ use crate::Timestamp;
 use crate::util::varint::{self, ReadExt, WriteExt};
 use message::{Message, MessageBuilder};
 
-#[derive(Debug, Eq, Fail, PartialEq)]
+#[derive(Clone, Debug, Eq, Fail, PartialEq)]
 pub enum Error {
     #[fail(display = "{}", _0)]
     BadFraming(Cow<'static, str>),

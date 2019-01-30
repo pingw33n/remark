@@ -21,7 +21,7 @@ use std::time::SystemTime;
 use crate::error::*;
 use crate::Timestamp;
 
-#[derive(Debug, Eq, Fail, PartialEq)]
+#[derive(Clone, Debug, Eq, Fail, PartialEq)]
 pub enum Error {
     #[fail(display = "{}", _0)]
     Corrupted(Cow<'static, str>),

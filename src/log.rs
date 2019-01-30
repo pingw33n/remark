@@ -11,7 +11,7 @@ use crate::entry::format::MIN_FRAME_LEN;
 use crate::error::*;
 use crate::segment::{self, Segment};
 
-#[derive(Debug, Eq, Fail, PartialEq)]
+#[derive(Clone, Debug, Eq, Fail, PartialEq)]
 pub enum Error {
     #[fail(display = "unknown files/directories found under a log directory: {}", _0)]
     UnknownDirEntries(Cow<'static, str>),
