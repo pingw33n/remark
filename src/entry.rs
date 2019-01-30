@@ -293,6 +293,10 @@ impl BufEntryBuilder {
         self.message_count
     }
 
+    pub fn get_encoded_len(&self) -> usize {
+        self.buf.len()
+    }
+
     pub fn term(&mut self, term: u64) -> &mut Self {
         self.term = term;
         self

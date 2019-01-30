@@ -88,6 +88,8 @@ pub struct Segment {
     min_timestamp: Timestamp,
     id_index:  IdIndex,
     timestamp_index: TimestampIndex,
+    index_each_bytes: u32,
+    bytes_since_last_index_push: u32,
 }
 
 impl Segment {
@@ -202,6 +204,8 @@ impl Segment {
             min_timestamp,
             id_index,
             timestamp_index,
+            index_each_bytes: options.index_each_bytes,
+            bytes_since_last_index_push: 0,
         })
     }
 
@@ -231,8 +235,15 @@ impl Segment {
 
         wr.write_all(&buf[..]).context(Error::Io)?;
 
-        self.id_index.push(cast::u32(entry.first_id() - self.base_id).unwrap(), pos);
-        self.timestamp_index.push(entry.first_timestamp(), pos);
+        self.bytes_since_last_index_push = self.bytes_since_last_index_push
+            .checked_add(cast::u32(buf.len()).unwrap())
+            .unwrap_or(u32::max_value());
+
+        if self.bytes_since_last_index_push >= self.index_each_bytes {
+            self.id_index.push(cast::u32(entry.first_id() - self.base_id).unwrap(), pos);
+            self.timestamp_index.push(entry.first_timestamp(), pos);
+            self.bytes_since_last_index_push = 0;
+        }
 
         Ok(())
     }
@@ -386,5 +397,36 @@ impl Iterator for Iter {
                 }
             };
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::entry::BufEntryBuilder;
+    use crate::entry::message::MessageBuilder;
+
+    #[test]
+    fn index_each_bytes() {
+        use crate::entry::format::FRAME_PROLOG_LEN;
+
+        let dir = mktemp::Temp::new_dir().unwrap();
+        let mut seg = Segment::create(&dir, 10, Options {
+            index_each_bytes: MIN_INDEX_EACH_BYTES,
+            .. Default::default()
+        }).unwrap();
+
+        let (mut entry, mut buf) = BufEntryBuilder::new(0, Timestamp::now()).build();
+        seg.push(&mut entry, &mut buf).unwrap();
+        assert_eq!(seg.id_index.entry_by_key(10), None);
+
+        let mut b = BufEntryBuilder::new(1, Timestamp::now());
+        while b.get_encoded_len() < cast::usize(MIN_INDEX_EACH_BYTES) {
+            b.message(Default::default());
+        }
+        let (mut entry, mut buf) = b.build();
+        let pos = seg.len();
+        seg.push(&mut entry, &mut buf).unwrap();
+        assert_eq!(seg.id_index.entry_by_key(1), Some((1, pos)));
     }
 }
