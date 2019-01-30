@@ -10,6 +10,9 @@ use crate::entry::BufEntry;
 use crate::entry::format::MIN_FRAME_LEN;
 use crate::error::*;
 use crate::segment::{self, Segment};
+use crate::util::file_mutex::FileMutex;
+
+const LOCK_FILE_NAME: &'static str = ".remark_lock";
 
 #[derive(Clone, Debug, Eq, Fail, PartialEq)]
 pub enum Error {
@@ -19,6 +22,9 @@ pub enum Error {
     #[fail(display = "{}", _0)]
     EntryTooBig(Cow<'static, str>),
 
+    #[fail(display = "couldn't lock log directory {:?}", _0)]
+    CantLockDir(PathBuf),
+
     #[fail(display = "IO error")]
     Io,
 }
@@ -27,6 +33,7 @@ pub enum Error {
 enum FileType {
     Data,
     IdIndex,
+    Lock,
     TimestampIndex,
 }
 
@@ -36,6 +43,7 @@ impl FileType {
         Some(match () {
             _ if p.ends_with(segment::DATA_FILE_SUFFIX) => FileType::Data,
             _ if p.ends_with(segment::ID_INDEX_FILE_SUFFIX) => FileType::IdIndex,
+            _ if p == LOCK_FILE_NAME => FileType::Lock,
             _ if p.ends_with(segment::TIMESTAMP_INDEX_FILE_SUFFIX) => FileType::TimestampIndex,
             _ => return None,
         })
@@ -46,14 +54,23 @@ pub struct Options {
     pub max_segment_len: u32,
 }
 
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            max_segment_len: 1024 * 1024 * 1024,
+        }
+    }
+}
+
 pub struct Log {
     path: PathBuf,
     segments: VecDeque<Segment>,
     max_segment_len: u32,
+    lock: FileMutex,
 }
 
 impl Log {
-    pub fn open_or_create(path: impl Into<PathBuf>, options: Options) -> Result<Self> {
+    pub fn open_or_create(path: impl AsRef<Path>, options: Options) -> Result<Self> {
         const UNKNOWN_DIR_ENTRIES_LIMIT: usize = 10;
 
         assert!(options.max_segment_len >= cast::u32(MIN_FRAME_LEN).unwrap(),
@@ -62,8 +79,17 @@ impl Log {
             "max_segment_len must be at most {} (HARD_MAX_SEGMENT_LEN)",
             segment::HARD_MAX_SEGMENT_LEN);
 
-        let path = path.into();
-        let mut segments = if path.exists() {
+        let path = path.as_ref().to_path_buf();
+
+        let exists = path.exists();
+        if !exists {
+            fs::create_dir_all(&path).context(Error::Io)?;
+        }
+
+        let lock = FileMutex::try_lock(&path.join(LOCK_FILE_NAME))
+            .with_context(|_| Error::CantLockDir(path.clone()))?;
+
+        let mut segments = if exists {
             let mut segment_paths = Vec::new();
             let mut unknown = Vec::new();
             for dir_entry in fs::read_dir(&path).context(Error::Io)? {
@@ -102,7 +128,6 @@ impl Log {
 
             segments.into()
         } else {
-            fs::create_dir_all(&path).context(Error::Io)?;
             VecDeque::new()
         };
 
@@ -115,6 +140,7 @@ impl Log {
             path,
             segments,
             max_segment_len: options.max_segment_len,
+            lock,
         })
     }
 
@@ -141,5 +167,24 @@ impl Log {
             i = b.binary_search_by(|s| s.partial_cmp(&id).unwrap());
         }
         i.ok()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use super::Error;
+    use assert_matches::assert_matches;
+    use std::mem;
+
+    #[test]
+    fn lock() {
+        let dir = mktemp::Temp::new_dir().unwrap();
+        let log = Log::open_or_create(&dir, Default::default()).unwrap();
+        assert_matches!(Log::open_or_create(&dir, Default::default()).err().unwrap().kind(),
+            ErrorKind::Log(Error::CantLockDir(_)));
+
+        mem::drop(log);
+        Log::open_or_create(&dir, Default::default()).unwrap();
     }
 }
