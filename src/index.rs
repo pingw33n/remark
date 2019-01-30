@@ -446,6 +446,7 @@ fn set_file_len(file: &File, len: usize, committed: bool) -> Result<()> {
 mod test {
     use super::*;
     use super::Error;
+    use assert_matches::assert_matches;
     use std::fs;
 
     #[test]
@@ -556,10 +557,8 @@ mod test {
         }
     }
 
-    fn is_push_misordered<T>(r: Result<T>) -> bool {
-        r.err()
-            .map(|e| matches!(e.kind(), ErrorKind::Index(Error::PushMisordered)))
-            .unwrap_or(false)
+    fn err_kind<T>(r: Result<T>) -> ErrorKind {
+        r.err().unwrap().kind().clone()
     }
 
     #[test]
@@ -571,12 +570,12 @@ mod test {
         }).unwrap();
         assert!(idx.push(100, 200).is_ok());
         assert!(idx.push(101, 201).is_ok());
-        assert!(is_push_misordered(idx.push(101, 201)));
-        assert!(is_push_misordered(idx.push(100, 200)));
-        assert!(is_push_misordered(idx.push(101, 200)));
-        assert!(is_push_misordered(idx.push(100, 201)));
-        assert!(is_push_misordered(idx.push(101, 202)));
-        assert!(is_push_misordered(idx.push(102, 201)));
+        assert_matches!(err_kind(idx.push(101, 201)), ErrorKind::Index(Error::PushMisordered));
+        assert_matches!(err_kind(idx.push(100, 200)), ErrorKind::Index(Error::PushMisordered));
+        assert_matches!(err_kind(idx.push(101, 200)), ErrorKind::Index(Error::PushMisordered));
+        assert_matches!(err_kind(idx.push(100, 201)), ErrorKind::Index(Error::PushMisordered));
+        assert_matches!(err_kind(idx.push(101, 202)), ErrorKind::Index(Error::PushMisordered));
+        assert_matches!(err_kind(idx.push(102, 201)), ErrorKind::Index(Error::PushMisordered));
         assert_eq!(idx.len(), 2);
         assert_eq!(idx.entry_by_key(100), Some((100, 200)));
         assert_eq!(idx.entry_by_key(101), Some((101, 201)));
@@ -593,8 +592,8 @@ mod test {
         assert!(idx.push(101, 201).is_ok());
         assert!(idx.push(101, 201).is_ok());
         assert!(idx.push(101, 202).is_ok());
-        assert!(is_push_misordered(idx.push(101, 200)));
-        assert!(is_push_misordered(idx.push(101, 199)));
-        assert!(is_push_misordered(idx.push(100, 203)));
+        assert_matches!(err_kind(idx.push(101, 200)), ErrorKind::Index(Error::PushMisordered));
+        assert_matches!(err_kind(idx.push(101, 199)), ErrorKind::Index(Error::PushMisordered));
+        assert_matches!(err_kind(idx.push(100, 203)), ErrorKind::Index(Error::PushMisordered));
     }
 }
