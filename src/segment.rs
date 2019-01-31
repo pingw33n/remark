@@ -1,3 +1,4 @@
+use if_chain::if_chain;
 use std::borrow::Cow;
 use std::cmp;
 use std::io::prelude::*;
@@ -41,6 +42,9 @@ pub enum Error {
     #[fail(display = "{}", _0)]
     SegmentTruncated(Cow<'static, str>),
 
+    #[fail(display = "fsync of segment file failed")]
+    Fsync,
+
     #[fail(display = "IO error")]
     Io,
 }
@@ -66,6 +70,7 @@ pub struct Options {
     pub read_only: bool,
     pub index_preallocate: u32,
     pub index_each_bytes: u32,
+    pub fsync_each_bytes: Option<u32>,
 }
 
 impl Default for Options {
@@ -74,6 +79,7 @@ impl Default for Options {
             read_only: false,
             index_preallocate: 1_000_000,
             index_each_bytes: 4096,
+            fsync_each_bytes: None,
         }
     }
 }
@@ -87,6 +93,8 @@ pub struct Segment {
     timestamp_index: TimestampIndex,
     index_each_bytes: u32,
     bytes_since_last_index_push: u32,
+    fsync_each_bytes: Option<u32>,
+    bytes_sync_last_fsync: u32,
 }
 
 impl Segment {
@@ -202,6 +210,8 @@ impl Segment {
             timestamp_index,
             index_each_bytes: options.index_each_bytes,
             bytes_since_last_index_push: 0,
+            fsync_each_bytes: options.fsync_each_bytes,
+            bytes_sync_last_fsync: 0,
         })
     }
 
@@ -218,7 +228,6 @@ impl Segment {
     }
 
     pub fn push(&mut self, entry: &mut BufEntry, buf: &mut BytesMut) -> Result<()> {
-        let mut wr = self.file.file.writer();
         assert!(self.file.file.len() + buf.len() as u64 <= HARD_MAX_SEGMENT_LEN as u64);
 
         entry.set_first_id(buf, self.next_id);
@@ -229,11 +238,10 @@ impl Segment {
 
         let pos = self.len();
 
-        wr.write_all(&buf[..]).context(Error::Io)?;
+        self.file.file.writer().write_all(&buf[..]).context(Error::Io)?;
 
         self.bytes_since_last_index_push = self.bytes_since_last_index_push
-            .checked_add(cast::u32(buf.len()).unwrap())
-            .unwrap_or(u32::max_value());
+            .saturating_add(cast::u32(buf.len()).unwrap());
 
         if self.bytes_since_last_index_push >= self.index_each_bytes {
             self.id_index.push(cast::u32(entry.first_id() - self.base_id).unwrap(), pos)
@@ -243,6 +251,23 @@ impl Segment {
             self.bytes_since_last_index_push = 0;
         }
 
+        self.bytes_sync_last_fsync = self.bytes_sync_last_fsync
+            .saturating_add(cast::u32(buf.len()).unwrap());
+
+        if_chain! {
+            if let Some(fsync_each_bytes) = self.fsync_each_bytes;
+            if self.bytes_sync_last_fsync >= fsync_each_bytes;
+            then {
+                self.force_fsync()?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn force_fsync(&mut self) -> Result<()> {
+        self.file.file.sync_all().context(Error::Io)?;
+        self.bytes_sync_last_fsync = 0;
         Ok(())
     }
 
