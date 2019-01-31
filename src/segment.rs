@@ -323,8 +323,9 @@ pub struct Iter {
     rd: Reader<Arc<SegFile>>,
     start_id: u64,
     end_id: u64,
-    // Specifies number of bytes to skip until the next entry.
-    prolog: Option<usize>,
+    // If Some then the last read entry was partial (prolog only).
+    // Thus before reading next entry it has to skip the unread part of the frame.
+    frame_len: Option<usize>,
     eof: bool,
     buf: BytesMut,
     file_grow_check: Option<u64>,
@@ -337,7 +338,7 @@ impl Iter {
             rd,
             start_id,
             end_id,
-            prolog: None,
+            frame_len: None,
             eof: force_eof,
             buf: BytesMut::new(),
             file_grow_check: None,
@@ -353,12 +354,12 @@ impl Iter {
     }
 
     pub fn complete_read(&mut self) -> Result<()> {
-        if let Some(frame_len) = self.prolog {
+        if let Some(frame_len) = self.frame_len {
             self.buf.set_len(frame_len);
             let r = self.rd.read_exact(&mut self.buf[format::FRAME_PROLOG_LEN..frame_len - format::FRAME_PROLOG_LEN])
                 .context(Error::Io);
             if r.is_ok() {
-                self.prolog = None;
+                self.frame_len = None;
             }
             r?;
         } else {
@@ -393,9 +394,9 @@ impl Iterator for Iter {
         }
 
         loop {
-            if let Some(frame_len) = self.prolog {
+            if let Some(frame_len) = self.frame_len {
                 self.rd.advance((frame_len - format::FRAME_PROLOG_LEN) as u64);
-                self.prolog = None;
+                self.frame_len = None;
             }
             break match BufEntry::read_prolog(&mut self.rd, &mut self.buf) {
                 Ok(Some(entry)) => {
@@ -404,7 +405,7 @@ impl Iterator for Iter {
                         self.eof = true;
                         break None;
                     }
-                    self.prolog = Some(entry.frame_len());
+                    self.frame_len = Some(entry.frame_len());
                     if first_id < self.start_id {
                         continue;
                     }
