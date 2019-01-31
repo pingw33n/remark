@@ -256,13 +256,13 @@ pub struct BufEntryBuilder {
 }
 
 impl BufEntryBuilder {
-    pub fn new(min_id: u64, min_timestamp: Timestamp) -> Self {
+    pub fn new() -> Self {
         Self {
             buf: BytesMut::new(),
-            first_id: min_id,
-            next_id: min_id,
-            first_timestamp: min_timestamp,
-            last_timestamp: min_timestamp,
+            first_id: 0,
+            next_id: 0,
+            first_timestamp: Timestamp::epoch(),
+            last_timestamp: Timestamp::epoch(),
             flags: 0,
             term: 0,
             message_count: 0,

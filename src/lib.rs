@@ -81,7 +81,7 @@ mod test {
 
     #[test]
     fn ttt() {
-        let mut b = BufEntryBuilder::new(10, Timestamp::now());
+        let mut b = BufEntryBuilder::new();
 //        b.message(MessageBuilder {
 //            //        value: Some("test".into()),
 //            ..Default::default()

@@ -416,11 +416,11 @@ mod test {
             .. Default::default()
         }).unwrap();
 
-        let (mut entry, mut buf) = BufEntryBuilder::new(0, Timestamp::now()).build();
+        let (mut entry, mut buf) = BufEntryBuilder::new().build();
         seg.push(&mut entry, &mut buf).unwrap();
         assert_eq!(seg.id_index.entry_by_key(10), None);
 
-        let mut b = BufEntryBuilder::new(1, Timestamp::now());
+        let mut b = BufEntryBuilder::new();
         while b.get_encoded_len() < cast::usize(MIN_INDEX_EACH_BYTES) {
             b.message(Default::default());
         }
