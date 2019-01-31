@@ -282,6 +282,7 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
     }
 
     fn used_buf(&self) -> &[u8] {
+        // TODO This can be made fully non-blocking by using atomic len.
         self.inner.lock().used_buf(&self.mmap).unwrap_or(&[])
     }
 
