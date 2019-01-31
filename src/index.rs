@@ -124,7 +124,7 @@ impl<K: Field, V: Field> Inner<K, V> {
     }
 
     fn growable_bytes(&self) -> usize {
-        self.max_capacity_bytes.checked_sub(self.capacity_bytes).unwrap_or(0)
+        self.max_capacity_bytes.saturating_sub(self.capacity_bytes)
     }
 
     fn ensure_capacity(&mut self, file: &File) -> Result<()> {

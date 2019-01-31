@@ -280,7 +280,7 @@ impl<T: AsRef<[u8]>> Seek for Cursor<T> {
 
 impl<T: AsRef<[u8]>> Cursor<T> {
     pub fn available(&self) -> usize {
-        self.inner.as_ref().len().checked_sub(self.pos).unwrap_or(0)
+        self.inner.as_ref().len().saturating_sub(self.pos)
     }
 }
 
