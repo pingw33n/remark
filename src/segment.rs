@@ -1,9 +1,7 @@
-use atoi::atoi;
-use parking_lot::Mutex;
 use std::borrow::Cow;
 use std::cmp;
 use std::io::prelude::*;
-use std::ops::{Bound, Range, RangeBounds};
+use std::ops::{Bound, RangeBounds};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -14,7 +12,6 @@ use crate::entry::format;
 use crate::error::*;
 use crate::file::*;
 use crate::index::{self as index, Index};
-use crate::util::ResultOptionExt;
 use std::borrow::Borrow;
 
 pub const DATA_FILE_SUFFIX: &'static str = ".data";
@@ -152,7 +149,6 @@ impl Segment {
             } else {
                 Error::Open(path.clone())
             })?;
-        let len = file.len();
 
         // FIXME repair data file: truncate to the entry boundary (either using index or during
         // index rebuild if it's damaged)
@@ -179,7 +175,7 @@ impl Segment {
         let timestamp_index = Index::open_or_create(&timestamp_index_path, index_mode)
             .with_more_context(|_| format!("opening timestamp index file {:?}", timestamp_index_path))?;
 
-        let (next_id, min_timestamp) = if let Some((id, pos)) = id_index.last_entry() {
+        let (next_id, min_timestamp) = if let Some(pos) = id_index.last_value() {
             let ref mut rd = file.reader();
             rd.set_position(pos as u64);
             let ref mut buf = BytesMut::new();
@@ -240,8 +236,10 @@ impl Segment {
             .unwrap_or(u32::max_value());
 
         if self.bytes_since_last_index_push >= self.index_each_bytes {
-            self.id_index.push(cast::u32(entry.first_id() - self.base_id).unwrap(), pos);
-            self.timestamp_index.push(entry.first_timestamp(), pos);
+            self.id_index.push(cast::u32(entry.first_id() - self.base_id).unwrap(), pos)
+                .more_context("pushing to id index")?;
+            self.timestamp_index.push(entry.first_timestamp(), pos)
+                .more_context("pushing to timestamp index")?;
             self.bytes_since_last_index_push = 0;
         }
 
@@ -250,7 +248,7 @@ impl Segment {
 
     pub fn get(&self, range: impl RangeBounds<u64>) -> Iter {
         let start_id = match range.start_bound() {
-            Bound::Excluded(v) => unreachable!(),
+            Bound::Excluded(_) => unreachable!(),
             Bound::Included(v) => *v,
             Bound::Unbounded => 0,
         };
@@ -404,12 +402,9 @@ impl Iterator for Iter {
 mod test {
     use super::*;
     use crate::entry::BufEntryBuilder;
-    use crate::entry::message::MessageBuilder;
 
     #[test]
     fn index_each_bytes() {
-        use crate::entry::format::FRAME_PROLOG_LEN;
-
         let dir = mktemp::Temp::new_dir().unwrap();
         let mut seg = Segment::create(&dir, 10, Options {
             index_each_bytes: MIN_INDEX_EACH_BYTES,

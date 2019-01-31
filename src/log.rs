@@ -1,4 +1,3 @@
-use fs2::FileExt;
 use itertools::Itertools;
 use std::borrow::Cow;
 use std::fs;
@@ -66,7 +65,7 @@ pub struct Log {
     path: PathBuf,
     segments: VecDeque<Segment>,
     max_segment_len: u32,
-    lock: FileMutex,
+    _lock: FileMutex,
 }
 
 impl Log {
@@ -86,7 +85,7 @@ impl Log {
             fs::create_dir_all(&path).context(Error::Io)?;
         }
 
-        let lock = FileMutex::try_lock(&path.join(LOCK_FILE_NAME))
+        let _lock = FileMutex::try_lock(&path.join(LOCK_FILE_NAME))
             .with_context(|_| Error::CantLockDir(path.clone()))?;
 
         let mut segments = if exists {
@@ -140,7 +139,7 @@ impl Log {
             path,
             segments,
             max_segment_len: options.max_segment_len,
-            lock,
+            _lock,
         })
     }
 

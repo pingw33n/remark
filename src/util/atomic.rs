@@ -1,10 +1,11 @@
 // copied from syncbox
+// TODO remove when std::sync::atomic::AtomicU64 is stable.
 
 pub use inner::*;
 
 #[cfg(target_pointer_width = "64")]
 mod inner {
-    use std::sync::atomic::{AtomicUsize, AtomicIsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     pub struct AtomicU64 {
         v: AtomicUsize,

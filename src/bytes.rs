@@ -85,14 +85,6 @@ impl From<BytesMut> for Bytes {
     }
 }
 
-//pub trait BufMut: Buf {
-//    fn as_mut_slice(&mut self) -> &mut [u8];
-//    fn set_u8(&mut self, i: usize, v: u8);
-//    fn set_u16<B: ByteOrder>(&mut self, i: usize, v: u16);
-//    fn set_u32<B: ByteOrder>(&mut self, i: usize, v: u32);
-//    fn set_u64<B: ByteOrder>(&mut self, i: usize, v: u64);
-//}
-
 #[derive(Default)]
 pub struct BytesMut {
     vec: Vec<u8>,
@@ -101,7 +93,7 @@ pub struct BytesMut {
 macro_rules! impl_set {
     ($s:ident, $w:ident: $ty:ty) => {
         pub fn $s<B: ByteOrder>(&mut self, i: usize, v: $ty) {
-            B::$w(&mut self.vec, v);
+            B::$w(&mut self.vec[i..], v);
         }
     };
 }

@@ -43,7 +43,7 @@ mod test {
     use super::*;
     use std::io::ErrorKind;
     use std::mem;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use std::thread;
 
     #[test]
@@ -85,12 +85,13 @@ mod test {
         const GROUP_COUNT: usize = 10;
         const GROUP_LEN: usize = 50;
 
-        let lock_path = mktemp::Temp::new_file().unwrap();
+        let mut lock_path = mktemp::Temp::new_file().unwrap();
+        lock_path.release();
 
-        let out = Mutex::new(Vec::new());
+        let out = Arc::new(Mutex::new(Vec::new()));
 
         let writers: Vec<_> = (0..THREAD_COUNT)
-            .map(|_| thread::spawn(|| {
+            .map(clone!(out, lock_path => move |_| thread::spawn(clone!(out, lock_path => move || {
                 for _ in 0..GROUP_COUNT {
                     let _lock = FileMutex::lock(&lock_path).unwrap();
                     for i in 0..GROUP_LEN {
@@ -98,7 +99,7 @@ mod test {
                         out.push(i);
                     }
                 }
-            }))
+            }))))
             .collect();
 
         for h in writers {

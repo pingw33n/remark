@@ -45,14 +45,8 @@ fields! {
 // Frame prolog fields that are not versioned (i.e. never change across versions).
 pub const FRAME_PROLOG_FIXED_LEN: usize = VERSION.next;
 
-// Same, but without the frame len.
-pub const PROLOG_FIXED_LEN: usize = FRAME_PROLOG_FIXED_LEN - FRAME_LEN.len;
-
 // Prolog fields for the current version.
 pub const FRAME_PROLOG_LEN: usize = MESSAGE_COUNT.next;
-
-// Same, but without the frame len.
-//pub const PROLOG_LEN: usize = FRAME_PROLOG_LEN - FRAME_LEN.len;
 
 pub const HEADER_CRC_RANGE: Range<usize> = HEADER_CRC.next..BODY_CRC.pos;
 pub const BODY_CRC_RANGE: RangeFrom<usize> = BODY_CRC.next..;

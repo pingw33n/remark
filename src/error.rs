@@ -1,7 +1,6 @@
 use failure::{Backtrace, Context, Fail as TFail};
 use std::borrow::Cow;
 use std::fmt;
-use std::io;
 
 pub use failure::ResultExt;
 pub use failure_derive::Fail;
@@ -83,7 +82,7 @@ impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(self, f)?;
         if let Some(bt) = self.backtrace() {
-            writeln!(f);
+            writeln!(f)?;
             write!(f, "{}", bt)?;
         }
         Ok(())
@@ -97,13 +96,13 @@ impl fmt::Display for Error {
 
         let mut msg = self.msg.as_ref();
         while let Some(m) = msg {
-            writeln!(f);
+            writeln!(f)?;
             write!(f, "  ...while {}", m.msg)?;
             msg = m.next.as_ref().map(|v| v.as_ref());
         }
 
         for e in it {
-            writeln!(f);
+            writeln!(f)?;
             write!(f, "  ...{}", e)?;
         }
         Ok(())

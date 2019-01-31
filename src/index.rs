@@ -1,22 +1,17 @@
 use byteorder::{BigEndian, ByteOrder};
-use if_chain::if_chain;
 use log::error;
 use matches::matches;
-use memmap::{Mmap, MmapMut, MmapOptions};
+use memmap::{MmapMut, MmapOptions};
 use parking_lot::Mutex;
-use std::borrow::{Borrow, Cow};
+use std::borrow::Cow;
 use std::cmp::{self, Ord, Ordering};
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io;
 use std::marker::PhantomData;
 use std::mem;
-use std::ops;
 use std::path::{Path, PathBuf};
 use std::result::{Result as StdResult};
 use std::slice;
-use std::sync::Arc;
-use std::time::SystemTime;
 
 use crate::error::*;
 use crate::Timestamp;
@@ -212,7 +207,7 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
             return Err(Error::Corrupted("index file is too big to be mmaped".into()).into());
         }
 
-        let mut file_len = file_len as usize;
+        let file_len = file_len as usize;
         if file_len % Self::ENTRY_LEN != 0 {
             return Err(Error::Corrupted(
                 format!("index file len ({}) is not a multiply of entry len ({})",
@@ -431,11 +426,6 @@ impl<K: Field, V: Field, KP: DupPolicy> Drop for Index<K, V, KP> {
     }
 }
 
-fn prev_multiple_of<T>(v: T, mult: T) -> T
-        where T: Copy + ops::Div<Output=T> + ops::Mul<Output=T> {
-    v / mult * mult
-}
-
 fn set_file_len(file: &File, len: usize, committed: bool) -> Result<()> {
     // TODO this is not going to work on Windows: can't resize file while it's mmap'ed.
     file.set_len(len.checked_add(!committed as usize).unwrap() as u64)
@@ -449,9 +439,11 @@ mod test {
     use super::Error;
     use assert_matches::assert_matches;
     use std::fs;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     #[test]
-    fn concurrent() {
+    fn threaded() {
         env_logger::init();
 
         use rand::{Rng, thread_rng};
@@ -465,14 +457,14 @@ mod test {
 
         let f = mktemp::Temp::new_file().unwrap();
         {
-            let idx: Index<u64, u32> = Index::open_or_create(&f, Mode::Growable {
+            let idx: Arc<Index<u64, u32>> = Arc::new(Index::open_or_create(&f, Mode::Growable {
                 preallocate: PREALLOCATE,
                 max_capacity: MAX_CAPACITY,
-            }).unwrap();
+            }).unwrap());
 
             let readers: Vec<_> = (0..THREAD_COUNT)
-                .map(|_| thread::spawn(|| {
-                    for i in 0..READ_COUNT {
+                .map(clone!(idx => move |_| thread::spawn(clone!(idx => move || {
+                    for _ in 0..READ_COUNT {
                         let len = idx.len();
                         if len > 0 {
                             let n = thread_rng().gen_range(0, len);
@@ -482,17 +474,17 @@ mod test {
                             assert_eq!(idx.entry_by_value(v), Some((k, v)));
 
                             if thread_rng().gen_range(0, 100) < 10 {
-                                idx.shrink_to_fit();
+                                idx.shrink_to_fit().unwrap();
                             }
                         }
                     }
-                }))
+                }))))
                 .collect();
 
             for k in 0..ENTRY_COUNT {
                 idx.push(k as u64 * 100, k as u32 * 10).unwrap();
                 if thread_rng().gen_range(0, 100) < 15 {
-                    thread::sleep_ms(1);
+                    thread::sleep(Duration::from_millis(1));
                 }
             }
 
@@ -512,7 +504,7 @@ mod test {
         let f_len = || fs::metadata(&f).unwrap().len();
 
         {
-            let mut idx: Index<u32, u64> = Index::open_or_create(&f, Mode::Growable {
+            let idx: Index<u32, u64> = Index::open_or_create(&f, Mode::Growable {
                 preallocate: 2,
                 max_capacity: 5,
             }).unwrap();
@@ -545,7 +537,7 @@ mod test {
         }
         assert_eq!(f_len(), 5 * 12);
         {
-            let mut idx: Index<u32, u64> = Index::open_or_create(&f, Mode::Static).unwrap();
+            let idx: Index<u32, u64> = Index::open_or_create(&f, Mode::Static).unwrap();
 
             assert_eq!(idx.len(), 5);
             for k in 1..=5 {
@@ -563,9 +555,9 @@ mod test {
     }
 
     #[test]
-    fn push_misorder__key_no_dup() {
+    fn push_misorder_key_no_dup() {
         let f = mktemp::Temp::new_file().unwrap();
-        let mut idx: Index<u32, u64> = Index::open_or_create(&f, Mode::Growable {
+        let idx: Index<u32, u64> = Index::open_or_create(&f, Mode::Growable {
             preallocate: 5,
             max_capacity: 5,
         }).unwrap();
@@ -583,9 +575,9 @@ mod test {
     }
 
     #[test]
-    fn push_misorder__key_dup_ignored() {
+    fn push_misorder_key_dup_ignored() {
         let f = mktemp::Temp::new_file().unwrap();
-        let mut idx: Index<u64, u32, DupIgnored> = Index::open_or_create(&f, Mode::Growable {
+        let idx: Index<u64, u32, DupIgnored> = Index::open_or_create(&f, Mode::Growable {
             preallocate: 5,
             max_capacity: 5,
         }).unwrap();

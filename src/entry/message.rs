@@ -1,14 +1,7 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use std::borrow::Cow;
-use std::io;
-use std::io::Cursor;
 use std::io::prelude::*;
-use std::marker::PhantomData;
-use std::ops::Range;
 
 use super::*;
 use super::Error;
-use crate::bytes::*;
 use crate::util::DurationExt;
 use crate::util::varint::{self, ReadExt, WriteExt};
 
@@ -43,7 +36,7 @@ pub struct Message {
 
 impl Message {
     pub fn read(rd: &mut impl Read, base_id: u64, base_timestamp: Timestamp) -> Result<Self> {
-        let len = rd.read_u32_varint().context(Error::Io)?;
+        let _len = rd.read_u32_varint().context(Error::Io)?;
         let id_delta = rd.read_u32_varint().context(Error::Io)?;
         let timestamp_delta = rd.read_u64_varint().context(Error::Io)?;
         let headers = Headers::read(rd)?;

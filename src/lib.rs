@@ -1,3 +1,6 @@
+#![deny(non_snake_case)]
+#![deny(unused_must_use)]
+
 #[macro_use]
 mod macros;
 
@@ -10,21 +13,8 @@ pub mod log;
 pub mod segment;
 pub mod util;
 
-use byteorder::{BigEndian, ByteOrder, ReadBytesExt, WriteBytesExt};
-use memmap::{Mmap, MmapMut};
-use std::collections::VecDeque;
-use std::fs::File;
-use std::io;
-use std::io::prelude::*;
-use std::marker::PhantomData;
-use std::mem;
-use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use crate::error::*;
-use crate::index::Index;
-use crate::segment::Segment;
 use crate::util::DurationExt;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
@@ -76,60 +66,4 @@ impl Into<Duration> for Timestamp {
 
 #[cfg(test)]
 mod test {
-    use super::*;
-    use crate::entry::BufEntryBuilder;
-    use crate::entry::BufEntry;
-    use crate::entry::message::MessageBuilder;
-    use crate::log::Log;
-
-    #[test]
-    fn ttt() {
-        let mut b = BufEntryBuilder::new();
-//        b.message(MessageBuilder {
-//            //        value: Some("test".into()),
-//            ..Default::default()
-//            //    }).message(MessageBuilder {
-//            //        key: Some("key2".into()),
-//            //        value: Some("value2".into()),
-//            //        .. Default::default()
-//        });
-        let (ref mut entry, ref mut buf) = b.build();
-
-//        {
-//            let mut log = Log::open_or_create("/tmp/my_log", log::Options { max_segment_len: 10_000_000 }).unwrap();
-//
-//            for _ in 0..100 {
-//                log.push(entry, buf).unwrap();
-//            }
-//        }
-
-//        {
-//            use std::fs::OpenOptions;
-//            let f = OpenOptions::new()
-//                .write(true)
-//                .open("/tmp/00000000000000000000.id").unwrap();
-//            f.set_len(8).unwrap();
-//
-//            let f = OpenOptions::new()
-//                .write(true)
-//                .open("/tmp/00000000000000000000.timestamp").unwrap();
-//            f.set_len(12).unwrap();
-//        }
-        let mut seg = Segment::open("/tmp/my_log/00000000000000000000.data", Default::default()).unwrap();
-//        for entry in seg.get(..) {
-//            dbg!(entry);
-//        }
-        let mut it = seg.get(8..=20);
-        let mut i = 0;
-        while let Some(entry) = it.next() {
-            if i == 5 {
-                break;
-            }
-            dbg!(entry.unwrap().first_id());
-//            dbg!(it.buf_mut().len());
-//            i += 1;
-        }
-
-        panic!();
-    }
 }

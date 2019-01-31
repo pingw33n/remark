@@ -3,8 +3,6 @@ pub mod file_mutex;
 pub mod varint;
 
 use std::fmt;
-use std::io;
-use std::ops;
 use std::time::Duration;
 
 pub trait ResultExt<T, E> {
@@ -52,47 +50,6 @@ impl<T, E> ResultOptionExt<T, E> for Result<Option<T>, E> {
         }
     }
 }
-
-
-
-pub trait WriteExt: io::Write {
-    fn write_varint_u16_(&mut self, v: u16) -> io::Result<()> {
-//        varint_enc!(v, buf, len => +);
-//        buf[3] = 5;
-//        self.write_all(&buf[..len])
-        Ok(())
-    }
-
-    fn write_varint_u16(&mut self, v: u16) -> io::Result<()> {
-
-//        self.write_all(&buf[..len])
-        unimplemented!()
-    }
-
-    fn write_varint_u32(&mut self, v: u32) -> io::Result<()> {
-        let mut len = 1;
-        let mut buf = [v as u8, 0, 0, 0, 0];
-        if buf[0] > 0x7f {
-            buf[1] = (v >> 7) as u8;
-            len += 1;
-            if buf[1] > 0x7f {
-                buf[2] = (v >> 14) as u8;
-                len += 1;
-                if buf[2] > 0x7f {
-                    buf[3] = (v >> 21) as u8;
-                    len += 1;
-                    if buf[3] > 0x7f {
-                        buf[4] = (v >> 28) as u8;
-                        len += 1;
-                    }
-                }
-            }
-        }
-        self.write_all(&buf[..len])
-    }
-}
-
-impl<T: io::Write> WriteExt for T {}
 
 pub trait DurationExt {
     fn as_millis_u64(&self) -> Option<u64>;

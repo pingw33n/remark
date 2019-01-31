@@ -1,11 +1,9 @@
 use parking_lot::Mutex;
 use std::fs;
 use std::io::prelude::*;
-use std::io::{Error, ErrorKind, Result};
+use std::io::{Error, Result};
 use std::os::unix::fs::FileExt;
-use std::os::unix::io::RawFd;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::util::atomic::AtomicU64;
@@ -84,7 +82,7 @@ impl File {
     pub fn writer(&self) -> Writer {
         Writer {
             file: self,
-            lock: self.write_lock.lock(),
+            _lock: self.write_lock.lock(),
         }
     }
 
@@ -115,9 +113,6 @@ impl File {
         if options.truncate {
             file.set_len(0)?;
         }
-
-        use std::os::unix::io::AsRawFd;
-        let raw = file.as_raw_fd();
 
         let len = file.metadata()?.len();
 
@@ -197,7 +192,7 @@ impl<F: Borrow<File>> From<F> for Reader<F> {
 
 pub struct Writer<'a> {
     file: &'a File,
-    lock: MutexGuard<'a, ()>,
+    _lock: MutexGuard<'a, ()>,
 }
 
 impl Write for Writer<'_> {

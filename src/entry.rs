@@ -1,13 +1,11 @@
 pub(in crate) mod format;
 pub mod message;
 
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use std::borrow::{Borrow, Cow};
-use std::io;
+use byteorder::{BigEndian, ReadBytesExt};
+use std::borrow::Cow;
 use std::io::SeekFrom;
 use std::io::prelude::*;
-use std::marker::PhantomData;
-use std::ops::{Deref, Range};
+use std::ops::Range;
 
 use crate::error::*;
 use crate::file::FileRead;
