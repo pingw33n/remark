@@ -101,37 +101,37 @@ impl BufEntry {
     pub fn decode(buf: &impl Buf) -> Result<Option<Self>> {
         use format::*;
 
-        let ref mut rd = Cursor::new(buf);
-        if rd.available() < FRAME_PROLOG_FIXED_LEN {
+        if buf.len() < FRAME_PROLOG_FIXED_LEN {
             return Ok(None);
         }
 
-        let frame_len = cast::usize(FRAME_LEN.read(rd).unwrap());
+        let frame_len = cast::usize(FRAME_LEN.get(buf));
         Self::check_frame_len(frame_len)?;
-        if rd.available() + format::FRAME_LEN.len < frame_len {
+        if buf.len() < frame_len {
             return Ok(None);
         }
 
-        let header_crc = HEADER_CRC.read(rd).unwrap();
+        let header_crc = HEADER_CRC.get(buf);
 
-        let version = VERSION.read(rd).unwrap();
+        let version = VERSION.get(buf);
         if version != CURRENT_VERSION {
             return Err(Error::BadVersion(format!(
                 "unsupported entry version: {}", version).into()).into());
         }
-        if rd.available() < FRAME_PROLOG_LEN - FRAME_PROLOG_FIXED_LEN {
+        if buf.len() < FRAME_PROLOG_LEN {
             return Ok(None);
         }
 
-        let first_id = FIRST_ID.read(rd).unwrap();
-        let last_id_delta = LAST_ID_DELTA.read(rd).unwrap();
-        let first_timestamp = FIRST_TIMESTAMP.read(rd).unwrap();
-        let last_timestamp = LAST_TIMESTAMP.read(rd).unwrap();
-        let flags = FLAGS.read(rd).unwrap();
-        let term = TERM.read(rd).unwrap();
-        let body_crc = BODY_CRC.read(rd).unwrap();
-        let message_count = MESSAGE_COUNT.read(rd).unwrap();
-        let messages = rd.position() as usize..frame_len;
+        let first_id = FIRST_ID.get(buf);
+        let last_id_delta = LAST_ID_DELTA.get(buf);
+        let first_timestamp = FIRST_TIMESTAMP.get(buf);
+        let last_timestamp = LAST_TIMESTAMP.get(buf);
+
+        let flags = FLAGS.get(buf);
+        let term = TERM.get(buf);
+        let body_crc = BODY_CRC.get(buf);
+        let message_count = MESSAGE_COUNT.get(buf);
+        let messages = FRAME_PROLOG_LEN..frame_len;
 
         Ok(Some(Self {
             frame_len,
