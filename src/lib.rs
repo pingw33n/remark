@@ -1,3 +1,6 @@
+#[macro_use]
+mod macros;
+
 pub mod bytes;
 pub mod entry;
 pub mod error;
