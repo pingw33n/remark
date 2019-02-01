@@ -10,6 +10,7 @@ use crate::Timestamp;
 use crate::bytes::*;
 use crate::entry::BufEntry;
 use crate::entry::format;
+use crate::entry::message::Id;
 use crate::error::*;
 use crate::file::*;
 use crate::index::{self as index, Index};
@@ -86,8 +87,8 @@ impl Default for Options {
 
 pub struct Segment {
     file: Arc<SegFile>,
-    base_id: u64,
-    next_id: u64,
+    base_id: Id,
+    next_id: Id,
     min_timestamp: Timestamp,
     id_index:  IdIndex,
     timestamp_index: TimestampIndex,
@@ -126,19 +127,21 @@ impl Segment {
                 file_name).into()).into());
         }
 
-        let base_id: u64 = (&file_name[..20]).parse()
-            .map_err(|_| Error::BadPath(
+        let base_id = (&file_name[..20]).parse()
+            .ok()
+            .and_then(Id::new)
+            .ok_or_else(|| Error::BadPath(
                 format!("couldn't parse base id from filename \"{}\"", file_name)
                     .into()).into_error())?;
 
         Self::new(dir, base_id, false, options)
     }
 
-    pub fn create(path: impl AsRef<Path>, base_id: u64, options: Options) -> Result<Self> {
+    pub fn create(path: impl AsRef<Path>, base_id: Id, options: Options) -> Result<Self> {
         Self::new(path, base_id, true, options)
     }
 
-    fn new(path: impl AsRef<Path>, base_id: u64, create_and_overwrite: bool,
+    fn new(path: impl AsRef<Path>, base_id: Id, create_and_overwrite: bool,
             options: Options) -> Result<Self> {
         assert!(options.index_each_bytes >= MIN_INDEX_EACH_BYTES);
         assert!(options.index_each_bytes <= MAX_INDEX_EACH_BYTES);
@@ -219,11 +222,11 @@ impl Segment {
         cast::u32(self.file.file.len()).unwrap()
     }
 
-    pub fn base_id(&self) -> u64 {
+    pub fn base_id(&self) -> Id {
         self.base_id
     }
 
-    pub fn next_id(&self) -> u64 {
+    pub fn next_id(&self) -> Id {
         self.next_id
     }
 
@@ -233,7 +236,7 @@ impl Segment {
         entry.set_first_id(buf, self.next_id);
         let timestamp = cmp::max(Timestamp::now(), self.min_timestamp);
         entry.set_timestamp(buf, timestamp);
-        self.next_id += 1;
+        self.next_id = self.next_id.checked_add(1).unwrap();
         self.min_timestamp = timestamp;
 
         let pos = self.len();
@@ -244,7 +247,9 @@ impl Segment {
             .saturating_add(cast::u32(buf.len()).unwrap());
 
         if self.bytes_since_last_index_push >= self.index_each_bytes {
-            self.id_index.push(cast::u32(entry.first_id() - self.base_id).unwrap(), pos)
+            let id_delta = cast::u32(entry.first_id().checked_delta(self.base_id)
+                .unwrap()).unwrap();
+            self.id_index.push(id_delta, pos)
                 .more_context("pushing to id index")?;
             self.timestamp_index.push(entry.first_timestamp(), pos)
                 .more_context("pushing to timestamp index")?;
@@ -271,11 +276,11 @@ impl Segment {
         Ok(())
     }
 
-    pub fn get(&self, range: impl RangeBounds<u64>) -> Iter {
+    pub fn get(&self, range: impl RangeBounds<Id>) -> Iter {
         let start_id = match range.start_bound() {
             Bound::Excluded(_) => unreachable!(),
             Bound::Included(v) => *v,
-            Bound::Unbounded => 0,
+            Bound::Unbounded => Id::min_value(),
         };
         let end_id = match range.end_bound() {
             Bound::Excluded(v) => {
@@ -286,7 +291,7 @@ impl Segment {
                 assert!(*v >= start_id);
                 v.checked_add(1).unwrap()
             },
-            Bound::Unbounded => u64::max_value(),
+            Bound::Unbounded => Id::max_value(),
         };
         let (start_pos, force_eof) = if end_id > start_id &&
                 start_id >= self.base_id && start_id < self.next_id {
@@ -302,14 +307,14 @@ impl Segment {
     }
 }
 
-impl cmp::PartialEq<u64> for Segment {
-    fn eq(&self, other: &u64) -> bool {
+impl cmp::PartialEq<Id> for Segment {
+    fn eq(&self, other: &Id) -> bool {
         *other >= self.base_id && *other < self.next_id
     }
 }
 
-impl cmp::PartialOrd<u64> for Segment {
-    fn partial_cmp(&self, other: &u64) -> Option<cmp::Ordering> {
+impl cmp::PartialOrd<Id> for Segment {
+    fn partial_cmp(&self, other: &Id) -> Option<cmp::Ordering> {
         let r = self.base_id.cmp(other);
         Some(if r == cmp::Ordering::Less && self.next_id > *other {
             cmp::Ordering::Equal
@@ -321,8 +326,8 @@ impl cmp::PartialOrd<u64> for Segment {
 
 pub struct Iter {
     rd: Reader<Arc<SegFile>>,
-    start_id: u64,
-    end_id: u64,
+    start_id: Id,
+    end_id: Id,
     // If Some then the last read entry was partial (prolog only).
     // Thus before reading next entry it has to skip the unread part of the frame.
     frame_len: Option<usize>,
@@ -332,7 +337,8 @@ pub struct Iter {
 }
 
 impl Iter {
-    fn new(rd: Reader<Arc<SegFile>>, start_id: u64, end_id: u64, force_eof: bool) -> Self {
+    fn new(rd: Reader<Arc<SegFile>>, start_id: Id, end_id: Id,
+            force_eof: bool) -> Self {
         assert!(end_id > start_id || end_id == start_id && force_eof);
         Self {
             rd,
@@ -432,7 +438,7 @@ mod test {
     #[test]
     fn index_each_bytes() {
         let dir = mktemp::Temp::new_dir().unwrap();
-        let mut seg = Segment::create(&dir, 10, Options {
+        let mut seg = Segment::create(&dir, Id::new(10).unwrap(), Options {
             index_each_bytes: MIN_INDEX_EACH_BYTES,
             .. Default::default()
         }).unwrap();

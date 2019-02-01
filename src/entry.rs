@@ -12,7 +12,7 @@ use crate::file::FileRead;
 use crate::bytes::*;
 use crate::Timestamp;
 use crate::util::varint::{self, ReadExt, WriteExt};
-use message::{Message, MessageBuilder};
+use message::{Id, Message, MessageBuilder};
 
 #[derive(Clone, Debug, Eq, Fail, PartialEq)]
 pub enum Error {
@@ -21,6 +21,9 @@ pub enum Error {
 
     #[fail(display = "{}", _0)]
     BadVersion(Cow<'static, str>),
+
+    #[fail(display = "{}", _0)]
+    BadHeader(Cow<'static, str>),
 
     #[fail(display = "{}", _0)]
     BadMessage(Cow<'static, str>),
@@ -41,7 +44,7 @@ pub type BufRange = Range<usize>;
 pub struct BufEntry {
     frame_len: usize,
     header_crc: u32,
-    first_id: u64,
+    first_id: Id,
     last_id_delta: u32,
     first_timestamp: Timestamp,
     last_timestamp: Timestamp,
@@ -122,7 +125,8 @@ impl BufEntry {
             return Ok(None);
         }
 
-        let first_id = FIRST_ID.get(buf);
+        let first_id = FIRST_ID.get(buf).ok_or_else(||
+            Error::BadHeader("invalid first_id (must not be 0)".into()).into_error())?;
         let last_id_delta = LAST_ID_DELTA.get(buf);
         let first_timestamp = FIRST_TIMESTAMP.get(buf);
         let last_timestamp = LAST_TIMESTAMP.get(buf);
@@ -184,17 +188,17 @@ impl BufEntry {
         self.frame_len
     }
 
-    pub fn first_id(&self) -> u64 {
+    pub fn first_id(&self) -> Id {
         self.first_id
     }
 
-    pub fn last_id(&self) -> u64 {
+    pub fn last_id(&self) -> Id {
         self.first_id.checked_add(cast::u64(self.last_id_delta)).unwrap()
     }
 
-    pub fn set_first_id(&mut self, buf: &mut BytesMut, first_id: u64) {
+    pub fn set_first_id(&mut self, buf: &mut BytesMut, first_id: Id) {
         self.first_id = first_id;
-        format::FIRST_ID.set(&mut *buf, first_id)
+        format::FIRST_ID.set(&mut *buf, Some(first_id))
     }
 
     pub fn first_timestamp(&self) -> Timestamp {
@@ -216,7 +220,7 @@ impl BufEntry {
 }
 
 pub struct BufMessageIter<R> {
-    base_id: u64,
+    base_id: Id,
     base_timestamp: Timestamp,
     left: u32,
     rd: R,
@@ -244,8 +248,8 @@ pub struct BufHeader {
 
 pub struct BufEntryBuilder {
     buf: BytesMut,
-    first_id: u64,
-    next_id: u64,
+    first_id: Id,
+    next_id: Id,
     first_timestamp: Timestamp,
     last_timestamp: Timestamp,
     flags: u16,
@@ -257,8 +261,8 @@ impl BufEntryBuilder {
     pub fn new() -> Self {
         Self {
             buf: BytesMut::new(),
-            first_id: 0,
-            next_id: 0,
+            first_id: Id::min_value(),
+            next_id: Id::min_value(),
             first_timestamp: Timestamp::epoch(),
             last_timestamp: Timestamp::epoch(),
             flags: 0,
@@ -267,15 +271,7 @@ impl BufEntryBuilder {
         }
     }
 
-    pub fn get_id_range(&self) -> Option<(u64, u64)> {
-        if self.message_count > 0 {
-            Some((self.first_id, self.next_id - 1))
-        } else {
-            None
-        }
-    }
-
-    pub fn get_next_id(&self) -> u64 {
+    pub fn get_next_id(&self) -> Id {
         self.next_id
     }
 
@@ -319,7 +315,7 @@ impl BufEntryBuilder {
             self.first_id = msg.id;
             self.first_timestamp = msg.timestamp;
         }
-        self.next_id = msg.id + 1;
+        self.next_id = msg.id.checked_add(1).unwrap();
         self.last_timestamp = msg.timestamp;
         self.message_count = self.message_count.checked_add(1).unwrap();
 
@@ -340,9 +336,13 @@ impl BufEntryBuilder {
         self
     }
 
-    fn last_id_delta(first: u64, next: u64) -> u32 {
-        if next > first {
-            cast::u32(next - 1 - first).unwrap()
+    fn last_id_from_next(next_id: Id) -> Option<Id> {
+        next_id.checked_sub(1)
+    }
+
+    fn last_id_delta(first_id: Id, next_id: Id) -> u32 {
+        if let Some(last_id) = Self::last_id_from_next(next_id) {
+            cast::u32(last_id - first_id).unwrap()
         } else {
             0
         }
@@ -362,7 +362,7 @@ impl BufEntryBuilder {
         wr.set_position(format::HEADER_CRC.next);
 
         VERSION.write(wr, CURRENT_VERSION).unwrap();
-        FIRST_ID.write(wr, self.first_id).unwrap();
+        FIRST_ID.write(wr, Some(self.first_id)).unwrap();
         LAST_ID_DELTA.write(wr, Self::last_id_delta(self.first_id, self.next_id)).unwrap();
         FIRST_TIMESTAMP.write(wr, self.first_timestamp).unwrap();
         LAST_TIMESTAMP.write(wr, self.last_timestamp).unwrap();

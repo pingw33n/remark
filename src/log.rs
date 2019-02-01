@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use crate::bytes::*;
 use crate::entry::BufEntry;
 use crate::entry::format::MIN_FRAME_LEN;
+use crate::entry::message::Id;
 use crate::error::*;
 use crate::segment::{self, Segment};
 use crate::util::file_mutex::FileMutex;
@@ -131,7 +132,7 @@ impl Log {
         };
 
         if segments.is_empty() {
-            segments.push_back(Segment::create(&path, 0, Default::default())
+            segments.push_back(Segment::create(&path, Id::min_value(), Default::default())
                 .with_more_context(|_| format!("creating segment 0 in {:?}", path))?);
         }
 
@@ -159,7 +160,7 @@ impl Log {
         self.segments.back_mut().unwrap().push(entry, buf)
     }
 
-    fn find_segment_idx(&self, id: u64) -> Option<usize> {
+    fn find_segment_idx(&self, id: Id) -> Option<usize> {
         let (a, b) = self.segments.as_slices();
         let mut i = a.binary_search_by(|s| s.partial_cmp(&id).unwrap());
         if i.is_err() {

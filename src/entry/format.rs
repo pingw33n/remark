@@ -4,6 +4,7 @@ use std::io::prelude::*;
 use std::ops::{Range, RangeFrom};
 use std::marker::PhantomData;
 
+use super::message::Id;
 use crate::bytes::Buf;
 use crate::Timestamp;
 
@@ -29,11 +30,13 @@ macro_rules! fields {
     (@impl $pos:expr =>) => {};
 }
 
+type OptId = Option<Id>;
+
 fields! {
     FRAME_LEN: u32 = 0;
     HEADER_CRC: u32;
     VERSION: u8;
-    FIRST_ID: u64;
+    FIRST_ID: OptId;
     LAST_ID_DELTA: u32;
     FIRST_TIMESTAMP: Timestamp;
     LAST_TIMESTAMP: Timestamp;
@@ -42,6 +45,7 @@ fields! {
     BODY_CRC: u32;
     MESSAGE_COUNT: u32;
 }
+
 // Frame prolog fields that are not versioned (i.e. never change across versions).
 pub const FRAME_PROLOG_FIXED_LEN: usize = VERSION.next;
 
@@ -158,6 +162,24 @@ impl FieldType for u64 {
 
     fn write(&self, wr: &mut Write) -> io::Result<()> {
         wr.write_u64::<BigEndian>(*self)
+    }
+}
+
+impl FieldType for Option<Id> {
+    fn get(buf: &impl Buf, i: usize) -> Self {
+        Id::new(u64::get(buf, i))
+    }
+
+    fn set(&self, buf: &mut [u8]) {
+        self.map(|v| v.as_u64()).unwrap_or(0).set(buf);
+    }
+
+    fn read(rd: &mut Read) -> io::Result<Self> {
+        u64::read(rd).map(Id::new)
+    }
+
+    fn write(&self, wr: &mut Write) -> io::Result<()> {
+        self.map(|v| v.as_u64()).unwrap_or(0).write(wr)
     }
 }
 

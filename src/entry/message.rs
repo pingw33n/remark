@@ -1,13 +1,71 @@
+use std::fmt;
 use std::io::prelude::*;
+use std::num::NonZeroU64;
+use std::ops;
 
 use super::*;
 use super::Error;
 use crate::util::DurationExt;
 use crate::util::varint::{self, ReadExt, WriteExt};
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Id(NonZeroU64);
+
+impl Id {
+    pub fn new(id: u64) -> Option<Self> {
+        NonZeroU64::new(id).map(Self)
+    }
+
+    pub fn min_value() -> Self {
+        Self::new(1).unwrap()
+    }
+
+    pub fn max_value() -> Self {
+        Self::new(u64::max_value()).unwrap()
+    }
+
+    pub fn as_u64(self) -> u64 {
+        self.0.get()
+    }
+
+    pub fn checked_add(self, rhs: u64) -> Option<Self> {
+        self.0.get().checked_add(rhs).map(|v| Self::new(v).unwrap())
+    }
+
+    pub fn checked_sub(self, rhs: u64) -> Option<Self> {
+        self.0.get().checked_sub(rhs).and_then(Self::new)
+    }
+
+    pub fn checked_delta(self, rhs: Self) -> Option<u64> {
+        self.0.get().checked_sub(rhs.as_u64())
+    }
+}
+
+impl fmt::Display for Id {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl ops::Sub for Id {
+    type Output = u64;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        self.as_u64().checked_sub(rhs.as_u64()).unwrap()
+    }
+}
+
+impl ops::Sub<u64> for Id {
+    type Output = Self;
+
+    fn sub(self, rhs: u64) -> Self::Output {
+        self.checked_sub(rhs).unwrap()
+    }
+}
+
 #[derive(Default)]
 pub struct MessageBuilder {
-    pub id: Option<u64>,
+    pub id: Option<Id>,
     pub timestamp: Option<Timestamp>,
     pub headers: Headers,
     pub key: Option<Vec<u8>>,
@@ -26,8 +84,9 @@ impl MessageBuilder {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Message {
-    pub id: u64,
+    pub id: Id,
     pub timestamp: Timestamp,
     pub headers: Headers,
     pub key: Option<Vec<u8>>,
@@ -35,9 +94,10 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn read(rd: &mut impl Read, base_id: u64, base_timestamp: Timestamp) -> Result<Self> {
+    pub fn read(rd: &mut impl Read, base_id: Id, base_timestamp: Timestamp) -> Result<Self> {
         let _len = rd.read_u32_varint().context(Error::Io)?;
         let id_delta = rd.read_u32_varint().context(Error::Io)?;
+        dbg!(id_delta);
         let timestamp_delta = rd.read_u64_varint().context(Error::Io)?;
         let headers = Headers::read(rd)?;
         let key = read_opt_bstring(rd)?;
@@ -57,8 +117,10 @@ impl Message {
         })
     }
 
-    pub fn writer(&self, base_id: u64, base_timestamp: Timestamp) -> MessageWriter {
-        assert!(base_id <= self.id && self.id - base_id <= u32::max_value() as u64);
+    pub fn writer(&self, base_id: Id, base_timestamp: Timestamp) -> MessageWriter {
+        assert!(self.id.checked_delta(base_id)
+            .filter(|&v| v <= u32::max_value() as u64)
+            .is_some(), "{} {}", base_id, self.id);
         assert!(base_timestamp <= self.timestamp);
         MessageWriter {
             msg: self,
@@ -70,13 +132,13 @@ impl Message {
 
 pub struct MessageWriter<'a> {
     msg: &'a Message,
-    base_id: u64,
+    base_id: Id,
     base_timestamp: Timestamp,
 }
 
 impl MessageWriter<'_> {
     pub fn id_delta(&self) -> u32 {
-        cast::u32(self.msg.id - self.base_id).unwrap()
+        cast::u32(self.msg.id.checked_delta(self.base_id).unwrap()).unwrap()
     }
 
     pub fn timestamp_delta(&self) -> u64 {
@@ -85,14 +147,18 @@ impl MessageWriter<'_> {
     }
 
     pub fn encoded_len(&self) -> usize {
-        varint::encoded_len(self.id_delta() as u64) as usize +
+        let l = varint::encoded_len(self.id_delta() as u64) as usize +
             varint::encoded_len(self.timestamp_delta()) as usize +
             self.msg.headers.encoded_len() +
             encoded_len_opt_bstring(self.msg.key.as_ref()) +
-            encoded_len_opt_bstring(self.msg.value.as_ref())
+            encoded_len_opt_bstring(self.msg.value.as_ref());
+        varint::encoded_len(l as u64) as usize + l
     }
 
     pub fn write(&self, wr: &mut impl Write) -> Result<()> {
+        dbg!(self.encoded_len());
+        wr.write_u32_varint(cast::u32(self.encoded_len()).unwrap()).context(Error::Io)?;
+        dbg!(self.id_delta());
         wr.write_u32_varint(self.id_delta()).context(Error::Io)?;
         wr.write_u64_varint(self.timestamp_delta()).context(Error::Io)?;
         self.msg.headers.write(wr)?;
@@ -102,14 +168,15 @@ impl MessageWriter<'_> {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Headers {
     pub vec: Vec<Header>,
 }
 
 impl Headers {
     pub fn encoded_len(&self) -> usize {
-        self.vec.iter().map(|h| h.encoded_len()).sum()
+        varint::encoded_len(self.vec.len() as u64) as usize +
+            self.vec.iter().map(|h| h.encoded_len()).sum::<usize>()
     }
 
     pub fn read(rd: &mut impl Read) -> Result<Self> {
@@ -132,6 +199,7 @@ impl Headers {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Header {
     pub name: String,
     pub value: Vec<u8>,
@@ -157,5 +225,68 @@ impl Header {
     pub fn write(&self, wr: &mut impl Write) -> Result<()> {
         write_bstring(wr, self.name.as_bytes())?;
         write_bstring(wr, &self.value)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    mod message_id {
+        use super::*;
+
+        #[test]
+        fn checked_delta() {
+            assert_eq!(Id::min_value().checked_delta(Id::min_value()), Some(0));
+            assert_eq!(Id::new(2).unwrap().checked_delta(Id::new(1).unwrap()), Some(1));
+            assert_eq!(Id::min_value().checked_delta(Id::new(2).unwrap()), None);
+            assert_eq!(Id::min_value().checked_delta(Id::max_value()), None);
+        }
+    }
+
+    mod message {
+        use super::*;
+        use std::io::Cursor;
+        use std::io::prelude::*;
+
+        #[test]
+        fn write_read() {
+            let d = &[
+                (MessageBuilder {
+                    id: Some(Id::min_value()),
+                    timestamp: Some(Timestamp::epoch()),
+                    .. Default::default()
+                }.build(), 6),
+                (Message {
+                    id: Id::new(12345).unwrap(),
+                    timestamp: Timestamp::now(),
+                    headers: Headers {
+                        vec: vec![
+                            Header { name: "".into(), value: vec![] },
+                            Header { name: "header ❤".into(), value: vec![0, 1, 128, 255] },
+                        ],
+                    },
+                    key: Some(vec![0, 1, 128, 255]),
+                    value: Some(vec![0, 42, 128, 255]),
+                }, 38),
+            ];
+
+            let ref mut cur = Cursor::new(Vec::new());
+            for (msg, len) in d {
+                cur.set_position(0);
+                cur.get_mut().clear();
+
+                let wr = msg.writer(Id::min_value(), Timestamp::epoch());
+                assert_eq!(&wr.encoded_len(), len);
+
+                wr.write(cur).unwrap();
+                assert_eq!(&cur.get_ref().len(), len);
+
+                cur.set_position(0);
+                let actual = Message::read(cur, Id::min_value(), Timestamp::epoch())
+                    .unwrap();
+                assert_eq!(&actual, msg);
+            }
+        }
     }
 }
