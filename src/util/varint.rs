@@ -130,17 +130,17 @@ impl<T: io::Read> ReadExt for T {}
 pub trait WriteExt: io::Write {
     fn write_u16_varint(&mut self, v: u16) -> io::Result<usize> {
         let (buf, len) = encode_u16(v);
-        self.write_all(&buf[..]).map(|_| len)
+        self.write_all(&buf[..len]).map(|_| len)
     }
 
     fn write_u32_varint(&mut self, v: u32) -> io::Result<usize> {
         let (buf, len) = encode_u32(v);
-        self.write_all(&buf[..]).map(|_| len)
+        self.write_all(&buf[..len]).map(|_| len)
     }
 
     fn write_u64_varint(&mut self, v: u64) -> io::Result<usize> {
         let (buf, len) = encode_u64(v);
-        self.write_all(&buf[..]).map(|_| len)
+        self.write_all(&buf[..len]).map(|_| len)
     }
 }
 
