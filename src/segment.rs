@@ -193,7 +193,7 @@ impl Segment {
             let mut next_id = None;
             let mut last_timestamp = None;
             while let Some(e) = BufEntry::read_prolog(rd, buf)? {
-                next_id = Some(e.last_id().checked_add(1).unwrap());
+                next_id = Some(e.end_id().checked_add(1).unwrap());
                 last_timestamp = Some(e.last_timestamp());
             }
             (next_id.unwrap(), last_timestamp.unwrap())
@@ -233,7 +233,7 @@ impl Segment {
     pub fn push(&mut self, entry: &mut BufEntry, buf: &mut BytesMut) -> Result<()> {
         assert!(self.file.file.len() + buf.len() as u64 <= HARD_MAX_SEGMENT_LEN as u64);
 
-        entry.set_first_id(buf, self.next_id);
+        entry.set_start_id(buf, self.next_id);
         let timestamp = cmp::max(Timestamp::now(), self.min_timestamp);
         entry.set_timestamp(buf, timestamp);
         self.next_id = self.next_id.checked_add(1).unwrap();
@@ -247,7 +247,7 @@ impl Segment {
             .saturating_add(cast::u32(buf.len()).unwrap());
 
         if self.bytes_since_last_index_push >= self.index_each_bytes {
-            let id_delta = cast::u32(entry.first_id().checked_delta(self.base_id)
+            let id_delta = cast::u32(entry.start_id().checked_delta(self.base_id)
                 .unwrap()).unwrap();
             self.id_index.push(id_delta, pos)
                 .more_context("pushing to id index")?;
@@ -406,16 +406,16 @@ impl Iterator for Iter {
             }
             break match BufEntry::read_prolog(&mut self.rd, &mut self.buf) {
                 Ok(Some(entry)) => {
-                    let first_id = entry.first_id();
-                    if first_id >= self.end_id {
+                    let start_id = entry.start_id();
+                    if start_id >= self.end_id {
                         self.eof = true;
                         break None;
                     }
                     self.frame_len = Some(entry.frame_len());
-                    if first_id < self.start_id {
+                    if start_id < self.start_id {
                         continue;
                     }
-                    self.eof = first_id == self.end_id - 1;
+                    self.eof = start_id == self.end_id - 1;
                     Some(Ok(entry))
                 }
                 Ok(None) => {
@@ -443,11 +443,12 @@ mod test {
             .. Default::default()
         }).unwrap();
 
-        let (mut entry, mut buf) = BufEntryBuilder::new().build();
+        let (mut entry, mut buf) = BufEntryBuilder::sparse(
+            Id::new(1).unwrap(), Id::new(1).unwrap()).build();
         seg.push(&mut entry, &mut buf).unwrap();
         assert_eq!(seg.id_index.entry_by_key(10), None);
 
-        let mut b = BufEntryBuilder::new();
+        let mut b = BufEntryBuilder::dense();
         while b.get_encoded_len() < cast::usize(MIN_INDEX_EACH_BYTES) {
             b.message(Default::default());
         }

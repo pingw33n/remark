@@ -36,8 +36,8 @@ fields! {
     FRAME_LEN: u32 = 0;
     HEADER_CRC: u32;
     VERSION: u8;
-    FIRST_ID: OptId;
-    LAST_ID_DELTA: u32;
+    START_ID: OptId;
+    END_ID_DELTA: u32;
     FIRST_TIMESTAMP: Timestamp;
     LAST_TIMESTAMP: Timestamp;
     FLAGS: u16;

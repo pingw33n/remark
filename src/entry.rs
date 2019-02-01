@@ -47,8 +47,8 @@ pub type BufRange = Range<usize>;
 pub struct BufEntry {
     frame_len: usize,
     header_crc: u32,
-    first_id: Id,
-    last_id_delta: u32,
+    start_id: Id,
+    end_id_delta: u32,
     first_timestamp: Timestamp,
     last_timestamp: Timestamp,
     flags: u16,
@@ -128,9 +128,9 @@ impl BufEntry {
             return Ok(None);
         }
 
-        let first_id = FIRST_ID.get(buf).ok_or_else(||
-            Error::BadHeader("invalid first_id (must not be 0)".into()).into_error())?;
-        let last_id_delta = LAST_ID_DELTA.get(buf);
+        let start_id = START_ID.get(buf).ok_or_else(||
+            Error::BadHeader("invalid start_id (must not be 0)".into()).into_error())?;
+        let end_id_delta = END_ID_DELTA.get(buf);
         let first_timestamp = FIRST_TIMESTAMP.get(buf);
         let last_timestamp = LAST_TIMESTAMP.get(buf);
 
@@ -143,8 +143,8 @@ impl BufEntry {
         Ok(Some(Self {
             frame_len,
             header_crc,
-            first_id,
-            last_id_delta,
+            start_id,
+            end_id_delta,
             first_timestamp,
             last_timestamp,
             flags,
@@ -168,7 +168,7 @@ impl BufEntry {
 
     pub fn iter(&self, buf: &Bytes) -> BufEntryIter<Cursor<Bytes>> {
         BufEntryIter {
-            next_id: self.first_id,
+            next_id: self.start_id,
             next_timestamp: self.first_timestamp,
             left: self.message_count,
             rd: Cursor::new(buf.clone())
@@ -191,17 +191,17 @@ impl BufEntry {
         self.frame_len
     }
 
-    pub fn first_id(&self) -> Id {
-        self.first_id
+    pub fn start_id(&self) -> Id {
+        self.start_id
     }
 
-    pub fn last_id(&self) -> Id {
-        self.first_id.checked_add(cast::u64(self.last_id_delta)).unwrap()
+    pub fn end_id(&self) -> Id {
+        self.start_id.checked_add(cast::u64(self.end_id_delta)).unwrap()
     }
 
-    pub fn set_first_id(&mut self, buf: &mut BytesMut, first_id: Id) {
-        self.first_id = first_id;
-        format::FIRST_ID.set(&mut *buf, Some(first_id))
+    pub fn set_start_id(&mut self, buf: &mut BytesMut, start_id: Id) {
+        self.start_id = start_id;
+        format::START_ID.set(&mut *buf, Some(start_id))
     }
 
     pub fn first_timestamp(&self) -> Timestamp {
@@ -260,7 +260,8 @@ pub struct BufHeader {
 
 pub struct BufEntryBuilder {
     buf: BytesMut,
-    first_id: Id,
+    start_id: Option<Id>,
+    end_id: Option<Id>,
     next_id: Id,
     first_timestamp: Timestamp,
     last_timestamp: Timestamp,
@@ -270,11 +271,23 @@ pub struct BufEntryBuilder {
 }
 
 impl BufEntryBuilder {
-    pub fn new() -> Self {
+    pub fn dense() -> Self {
+        Self::new(None, None)
+    }
+
+    pub fn sparse(start_id: Id, end_id: Id) -> Self {
+        Self::new(Some(start_id), Some(end_id))
+    }
+
+    fn new(start_id: Option<Id>, end_id: Option<Id>) -> Self {
+        assert!(start_id.is_none() || end_id.is_none() ||
+            start_id.unwrap() <= end_id.unwrap());
+        let next_id = start_id.unwrap_or(Id::min_value());
         Self {
             buf: BytesMut::new(),
-            first_id: Id::min_value(),
-            next_id: Id::min_value(),
+            start_id,
+            end_id,
+            next_id,
             first_timestamp: Timestamp::epoch(),
             last_timestamp: Timestamp::epoch(),
             flags: 0,
@@ -283,8 +296,18 @@ impl BufEntryBuilder {
         }
     }
 
-    pub fn get_last_id(&self) -> Option<Id> {
-        Self::last_id_from_next(self.next_id)
+    pub fn get_encoded_len(&self) -> usize {
+        self.buf.len()
+    }
+
+    pub fn get_id_range(&self) -> Option<(Id, Id)> {
+        if let Some(start_id) = self.start_id {
+            let end_id = self.end_id
+                .unwrap_or_else(|| Self::end_id_from_next(self.next_id).unwrap());
+            Some((start_id, end_id))
+        } else {
+            None
+        }
     }
 
     pub fn get_timestamp_range(&self) -> Option<(Timestamp, Timestamp)> {
@@ -295,12 +318,16 @@ impl BufEntryBuilder {
         }
     }
 
-    pub fn get_message_count(&self) -> u32 {
-        self.message_count
+    pub fn get_flags(&self) -> u16 {
+        self.flags
     }
 
-    pub fn get_encoded_len(&self) -> usize {
-        self.buf.len()
+    pub fn get_term(&self) -> u64 {
+        self.term
+    }
+
+    pub fn get_message_count(&self) -> u32 {
+        self.message_count
     }
 
     pub fn term(&mut self, term: u64) -> &mut Self {
@@ -315,6 +342,7 @@ impl BufEntryBuilder {
         } else {
             let msg_id = msg.id.unwrap();
             assert!(msg_id >= self.next_id);
+            assert!(self.end_id.is_none() || msg_id <= self.end_id.unwrap());
             self.next_id = msg_id;
         }
         self.next_id = self.next_id.checked_add(1).unwrap();
@@ -328,7 +356,9 @@ impl BufEntryBuilder {
         let msg = msg.build();
 
         let next_timestamp = if self.message_count == 0 {
-            self.first_id = msg.id;
+            if self.start_id.is_none() {
+                self.start_id = Some(msg.id);
+            }
             self.first_timestamp = msg.timestamp;
             self.first_timestamp
         } else {
@@ -354,19 +384,36 @@ impl BufEntryBuilder {
         self
     }
 
-    fn last_id_from_next(next_id: Id) -> Option<Id> {
+    fn id_delta(id_range: (Id, Id)) -> u32 {
+        cast::u32(id_range.1 - id_range.0).unwrap()
+    }
+
+    pub fn build(mut self) -> (BufEntry, BytesMut) {
+        let id_range = self.get_id_range().expect("can't build dense entry without messages");
+        dbg!(id_range);
+        let (header_crc, body_crc) = self.write_prolog(id_range);
+        let frame_len = self.get_encoded_len();
+        (BufEntry {
+            frame_len,
+            header_crc,
+            start_id: id_range.0,
+            end_id_delta: Self::id_delta(id_range),
+            first_timestamp: self.first_timestamp,
+            last_timestamp: self.last_timestamp,
+            flags: self.flags,
+            term: self.term,
+            body_crc,
+            message_count: self.message_count,
+            body: format::FRAME_PROLOG_LEN..frame_len,
+        }, self.buf)
+    }
+
+    fn end_id_from_next(next_id: Id) -> Option<Id> {
         next_id.checked_sub(1)
     }
 
-    fn last_id_delta(first_id: Id, next_id: Id) -> u32 {
-        if let Some(last_id) = Self::last_id_from_next(next_id) {
-            cast::u32(last_id - first_id).unwrap()
-        } else {
-            0
-        }
-    }
-
-    fn write_prolog(&mut self) {
+    /// Returns (header_crc, body_crc).
+    fn write_prolog(&mut self, id_range: (Id, Id)) -> (u32, u32) {
         use format::*;
 
         self.buf.ensure_len(format::FRAME_PROLOG_LEN);
@@ -380,8 +427,8 @@ impl BufEntryBuilder {
         wr.set_position(format::HEADER_CRC.next);
 
         VERSION.write(wr, CURRENT_VERSION).unwrap();
-        FIRST_ID.write(wr, Some(self.first_id)).unwrap();
-        LAST_ID_DELTA.write(wr, Self::last_id_delta(self.first_id, self.next_id)).unwrap();
+        START_ID.write(wr, Some(id_range.0)).unwrap();
+        END_ID_DELTA.write(wr, Self::id_delta(id_range)).unwrap();
         FIRST_TIMESTAMP.write(wr, self.first_timestamp).unwrap();
         LAST_TIMESTAMP.write(wr, self.last_timestamp).unwrap();
         FLAGS.write(wr, self.flags).unwrap();
@@ -397,12 +444,8 @@ impl BufEntryBuilder {
 
         let body_crc = crc(&wr.get_ref()[format::BODY_CRC_RANGE]);
         format::BODY_CRC.set(wr.get_mut(), body_crc);
-    }
 
-    pub fn build(mut self) -> (BufEntry, BytesMut) {
-        self.write_prolog();
-        let buf_entry = BufEntry::decode(&self.buf).unwrap().unwrap();
-        (buf_entry, self.buf)
+        (header_crc, body_crc)
     }
 }
 
