@@ -94,55 +94,62 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn read(rd: &mut impl Read, base_id: Id, base_timestamp: Timestamp) -> Result<Self> {
-        let _len = rd.read_u32_varint().context(Error::Io)?;
+    pub fn read(rd: &mut impl Read, next_id: Id, next_timestamp: Timestamp) -> Result<Self> {
+        let len = rd.read_u32_varint().context(Error::Io)?;
         let id_delta = rd.read_u32_varint().context(Error::Io)?;
-        dbg!(id_delta);
         let timestamp_delta = rd.read_u64_varint().context(Error::Io)?;
         let headers = Headers::read(rd)?;
         let key = read_opt_bstring(rd)?;
         let value = read_opt_bstring(rd)?;
 
-        let id = base_id.checked_add(id_delta as u64).ok_or_else(||
-            Error::BadMessage("stored message id_delta overflows u64".into()).into_error())?;
-        let timestamp = base_timestamp.checked_add_millis(timestamp_delta).ok_or_else(||
-            Error::BadMessage("stored message timestamp_delta overflows u64".into()).into_error())?;
+        let id = next_id.checked_add(id_delta as u64).ok_or_else(||
+            Error::BadMessage("stored message id overflows u64".into()).into_error())?;
+        let timestamp = next_timestamp.checked_add_millis(timestamp_delta).ok_or_else(||
+            Error::BadMessage("stored message timestamp overflows u64".into()).into_error())?;
 
-        Ok(Self {
+        let r = Self {
             id,
             timestamp,
             headers,
             key,
             value,
-        })
+        };
+
+        // TODO should be already able to tell how much bytes was actually read from rd.
+        if r.writer(next_id, next_timestamp).encoded_len() != cast::usize(len) {
+            return Err(Error::BadMessage("message's stored len and actual len differ"
+                .into()).into());
+        }
+
+        Ok(r)
     }
 
-    pub fn writer(&self, base_id: Id, base_timestamp: Timestamp) -> MessageWriter {
-        assert!(self.id.checked_delta(base_id)
+    pub fn writer(&self, next_id: Id, next_timestamp: Timestamp) -> MessageWriter {
+        assert!(self.id.checked_delta(next_id)
             .filter(|&v| v <= u32::max_value() as u64)
-            .is_some(), "{} {}", base_id, self.id);
-        assert!(base_timestamp <= self.timestamp);
+            .is_some());
+        assert!(self.timestamp >= next_timestamp);
         MessageWriter {
             msg: self,
-            base_id,
-            base_timestamp,
+            next_id,
+            next_timestamp,
         }
     }
 }
 
 pub struct MessageWriter<'a> {
     msg: &'a Message,
-    base_id: Id,
-    base_timestamp: Timestamp,
+    next_id: Id,
+    next_timestamp: Timestamp,
 }
 
 impl MessageWriter<'_> {
     pub fn id_delta(&self) -> u32 {
-        cast::u32(self.msg.id.checked_delta(self.base_id).unwrap()).unwrap()
+        cast::u32(self.msg.id.checked_delta(self.next_id).unwrap()).unwrap()
     }
 
     pub fn timestamp_delta(&self) -> u64 {
-        self.msg.timestamp.duration_since(self.base_timestamp).unwrap()
+        self.msg.timestamp.duration_since(self.next_timestamp).unwrap()
             .as_millis_u64().unwrap()
     }
 
@@ -156,9 +163,7 @@ impl MessageWriter<'_> {
     }
 
     pub fn write(&self, wr: &mut impl Write) -> Result<()> {
-        dbg!(self.encoded_len());
         wr.write_u32_varint(cast::u32(self.encoded_len()).unwrap()).context(Error::Io)?;
-        dbg!(self.id_delta());
         wr.write_u32_varint(self.id_delta()).context(Error::Io)?;
         wr.write_u64_varint(self.timestamp_delta()).context(Error::Io)?;
         self.msg.headers.write(wr)?;
@@ -247,19 +252,19 @@ mod test {
     mod message {
         use super::*;
         use std::io::Cursor;
-        use std::io::prelude::*;
 
         #[test]
         fn write_read() {
+            let now = Timestamp::now();
             let d = &[
-                (MessageBuilder {
+                MessageBuilder {
                     id: Some(Id::min_value()),
                     timestamp: Some(Timestamp::epoch()),
                     .. Default::default()
-                }.build(), 6),
-                (Message {
+                }.build(),
+                Message {
                     id: Id::new(12345).unwrap(),
-                    timestamp: Timestamp::now(),
+                    timestamp: now,
                     headers: Headers {
                         vec: vec![
                             Header { name: "".into(), value: vec![] },
@@ -268,24 +273,32 @@ mod test {
                     },
                     key: Some(vec![0, 1, 128, 255]),
                     value: Some(vec![0, 42, 128, 255]),
-                }, 38),
+                },
             ];
 
             let ref mut cur = Cursor::new(Vec::new());
-            for (msg, len) in d {
-                cur.set_position(0);
-                cur.get_mut().clear();
+            for msg in d {
+                for &(next_id, next_timestamp) in &[
+                    (Id::min_value(), Timestamp::epoch()),
+                    (Id::new(12345).unwrap(), now),
+                ] {
+                    cur.set_position(0);
+                    cur.get_mut().clear();
 
-                let wr = msg.writer(Id::min_value(), Timestamp::epoch());
-                assert_eq!(&wr.encoded_len(), len);
+                    if msg.id < next_id || msg.timestamp < next_timestamp {
+                        continue;
+                    }
+                    let wr = msg.writer(next_id, next_timestamp);
 
-                wr.write(cur).unwrap();
-                assert_eq!(&cur.get_ref().len(), len);
+                    wr.write(cur).unwrap();
+                    assert_eq!(cur.get_ref().len(), wr.encoded_len());
 
-                cur.set_position(0);
-                let actual = Message::read(cur, Id::min_value(), Timestamp::epoch())
-                    .unwrap();
-                assert_eq!(&actual, msg);
+                    cur.set_position(0);
+                    let actual = Message::read(cur,next_id, next_timestamp)
+                        .unwrap();
+                    assert_eq!(&actual, msg);
+                }
+
             }
         }
     }

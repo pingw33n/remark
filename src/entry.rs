@@ -26,6 +26,9 @@ pub enum Error {
     BadHeader(Cow<'static, str>),
 
     #[fail(display = "{}", _0)]
+    BadBody(Cow<'static, str>),
+
+    #[fail(display = "{}", _0)]
     BadMessage(Cow<'static, str>),
 
     #[fail(display = "IO error")]
@@ -163,10 +166,10 @@ impl BufEntry {
         format::FRAME_PROLOG_FIXED_LEN + self.body.len()
     }
 
-    pub fn messages(&self, buf: &Bytes) -> BufMessageIter<Cursor<Bytes>> {
-        BufMessageIter {
-            base_id: self.first_id,
-            base_timestamp: self.first_timestamp,
+    pub fn iter(&self, buf: &Bytes) -> BufEntryIter<Cursor<Bytes>> {
+        BufEntryIter {
+            next_id: self.first_id,
+            next_timestamp: self.first_timestamp,
             left: self.message_count,
             rd: Cursor::new(buf.clone())
         }
@@ -174,7 +177,7 @@ impl BufEntry {
 
     fn check_frame_len(len: usize) -> Result<()> {
         if len < format::FRAME_PROLOG_FIXED_LEN {
-            return Err(Error::BadFraming(format!("stored entry appears truncated ({} < {})",
+            return Err(Error::BadFraming(format!("frame len stored entry appears truncated ({} < {})",
                 len, format::FRAME_PROLOG_FIXED_LEN).into()).into());
         }
         if len > MAX_ENTRY_LEN {
@@ -219,25 +222,34 @@ impl BufEntry {
     }
 }
 
-pub struct BufMessageIter<R> {
-    base_id: Id,
-    base_timestamp: Timestamp,
+pub struct BufEntryIter<R> {
+    next_id: Id,
+    next_timestamp: Timestamp,
     left: u32,
     rd: R,
 }
 
-impl<R: Read> Iterator for BufMessageIter<R> {
+impl<R: Read> Iterator for BufEntryIter<R> {
     type Item = Result<Message>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.left == 0 {
             return None;
         }
-        let r = Message::read(&mut self.rd, self.base_id, self.base_timestamp);
-        if r.is_ok() {
-            self.left -= 1;
-        }
-        Some(r)
+        Some(match Message::read(&mut self.rd, self.next_id, self.next_timestamp) {
+            Ok(msg) => {
+                self.left -= 1;
+                if self.left > 0 {
+                    match msg.id.checked_add(1) {
+                        Some(next_id) => self.next_id = next_id,
+                        None => return Some(Err(
+                            Error::BadMessage("message ID overflowed u64".into()).into())),
+                    }
+                }
+                Ok(msg)
+            }
+            Err(e) => Err(e),
+        })
     }
 }
 
@@ -271,8 +283,8 @@ impl BufEntryBuilder {
         }
     }
 
-    pub fn get_next_id(&self) -> Id {
-        self.next_id
+    pub fn get_last_id(&self) -> Option<Id> {
+        Self::last_id_from_next(self.next_id)
     }
 
     pub fn get_timestamp_range(&self) -> Option<(Timestamp, Timestamp)> {
@@ -297,11 +309,15 @@ impl BufEntryBuilder {
     }
 
     pub fn message(&mut self, mut msg: MessageBuilder) -> &mut Self {
+        let expected_next_id = self.next_id;
         if msg.id.is_none() {
             msg.id = Some(self.next_id);
         } else {
-            assert!(msg.id.unwrap() >= self.next_id);
+            let msg_id = msg.id.unwrap();
+            assert!(msg_id >= self.next_id);
+            self.next_id = msg_id;
         }
+        self.next_id = self.next_id.checked_add(1).unwrap();
 
         if msg.timestamp.is_none() {
             msg.timestamp = Some(self.last_timestamp);
@@ -311,15 +327,17 @@ impl BufEntryBuilder {
 
         let msg = msg.build();
 
-        if self.message_count == 0 {
+        let next_timestamp = if self.message_count == 0 {
             self.first_id = msg.id;
             self.first_timestamp = msg.timestamp;
-        }
-        self.next_id = msg.id.checked_add(1).unwrap();
+            self.first_timestamp
+        } else {
+            self.last_timestamp
+        };
         self.last_timestamp = msg.timestamp;
         self.message_count = self.message_count.checked_add(1).unwrap();
 
-        let msg_wr = msg.writer(self.first_id, self.first_timestamp);
+        let msg_wr = msg.writer(expected_next_id, next_timestamp);
 
         if self.buf.capacity() == 0 {
             let len = format::FRAME_PROLOG_LEN + msg_wr.encoded_len();
@@ -374,10 +392,10 @@ impl BufEntryBuilder {
 
         MESSAGE_COUNT.write(wr, self.message_count).unwrap();
 
-        let header_crc = crc::crc32::checksum_castagnoli(&wr.get_ref()[format::HEADER_CRC_RANGE]);
+        let header_crc = crc(&wr.get_ref()[format::HEADER_CRC_RANGE]);
         format::HEADER_CRC.set(wr.get_mut(), header_crc);
 
-        let body_crc = crc::crc32::checksum_castagnoli(&wr.get_ref()[format::BODY_CRC_RANGE]);
+        let body_crc = crc(&wr.get_ref()[format::BODY_CRC_RANGE]);
         format::BODY_CRC.set(wr.get_mut(), body_crc);
     }
 
@@ -414,7 +432,7 @@ fn read_opt_bstring(rd: &mut impl Read) -> Result<Option<Vec<u8>>> {
 }
 
 fn read_opt_string(rd: &mut impl Read) -> Result<Option<String>> {
-    if let Some(s) = read_opt_bstring(rd).context(Error::Io)? {
+    if let Some(s) = read_opt_bstring(rd)? {
         String::from_utf8(s).map(Some).map_err(|_|
             Error::BadMessage("malformed UTF-8 string".into()).into_error())
     } else {
@@ -436,4 +454,8 @@ fn write_opt_bstring<T: AsRef<[u8]>>(wr: &mut impl Write, buf: Option<T>) -> Res
         wr.write_u32_varint(0).context(Error::Io)?;
         Ok(())
     }
+}
+
+fn crc(buf: &[u8]) -> u32 {
+    crc::crc32::checksum_castagnoli(buf)
 }
