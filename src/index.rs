@@ -417,10 +417,10 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
         value.encode(&mut entry[K::LEN..]);
     }
 
-    fn check_field<T: Field, P: DupPolicy>(new: T, last: T) -> Result<()> {
+    fn check_field<T: Field, DP: DupPolicy>(new: T, last: T) -> Result<()> {
         match new.cmp(&last) {
             Ordering::Less => Err(Error::PushMisordered.into()),
-            Ordering::Equal => if KP::__DUP_ALLOWED {
+            Ordering::Equal => if DP::__DUP_ALLOWED {
                 Ok(())
             } else {
                 Err(Error::PushMisordered.into())
@@ -595,11 +595,11 @@ mod test {
         }).unwrap();
         assert!(idx.push(100, 200).is_ok());
         assert!(idx.push(101, 201).is_ok());
-        assert!(idx.push(101, 201).is_ok());
         assert!(idx.push(101, 202).is_ok());
+        assert_matches!(err_kind(idx.push(101, 201)), ErrorKind::Index(Error::PushMisordered));
         assert_matches!(err_kind(idx.push(101, 200)), ErrorKind::Index(Error::PushMisordered));
         assert_matches!(err_kind(idx.push(101, 199)), ErrorKind::Index(Error::PushMisordered));
         assert_matches!(err_kind(idx.push(100, 203)), ErrorKind::Index(Error::PushMisordered));
-        assert_eq!(idx.len(), 4);
+        assert_eq!(idx.len(), 3);
     }
 }
