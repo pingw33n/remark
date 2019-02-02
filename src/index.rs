@@ -294,16 +294,7 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
     }
 
     pub fn entry_by_key(&self, key: K) -> Option<(K, V)> {
-        let buf = self.used_buf();
-        let i = match Self::binary_search_by_key(buf, key) {
-            Ok(i) => i,
-            Err(i) => if i == 0 {
-                return None;
-            } else {
-                i - Self::ENTRY_LEN
-            }
-        };
-        Some(Self::decode_entry(&buf[i..]))
+        self.entry_by(|buf| Self::binary_search_by_key(buf, key))
     }
 
     pub fn value_by_key(&self, key: K) -> Option<V> {
@@ -311,15 +302,7 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
     }
 
     pub fn entry_by_value(&self, value: V) -> Option<(K, V)> {
-        let i = match Self::binary_search_by_value(self.used_buf(), value) {
-            Ok(i) => i,
-            Err(i) => if i == 0 {
-                return None;
-            } else {
-                i - Self::ENTRY_LEN
-            }
-        };
-        Some(Self::decode_entry(&self.used_buf()[i..]))
+        self.entry_by(|buf| Self::binary_search_by_value(buf, value))
     }
 
     pub fn key_by_value(&self, value: V) -> Option<K> {
@@ -369,7 +352,8 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
         })
     }
 
-    fn binary_search(buf: &[u8], f: impl Fn(&[u8]) -> Ordering) -> StdResult<usize, usize> {
+    fn binary_search<DP, F>(buf: &[u8], f: F) -> StdResult<usize, usize>
+            where DP: DupPolicy, F: Fn(&[u8]) -> Ordering {
         debug_assert!(buf.len() % Self::ENTRY_LEN == 0);
         let mut len = buf.len();
         if len == 0 {
@@ -380,6 +364,9 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
             let half = len / 2 / Self::ENTRY_LEN * Self::ENTRY_LEN;
             let mid = base + half;
             let cmp = f(&buf[mid..mid + Self::ENTRY_LEN]);
+            if !DP::__DUP_ALLOWED && cmp == Ordering::Equal {
+                return Ok(mid);
+            }
             if cmp != Ordering::Greater {
                 base = mid;
             }
@@ -393,11 +380,11 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
     }
 
     fn binary_search_by_key(buf: &[u8], key: K) -> StdResult<usize, usize> {
-        Self::binary_search(buf, |e| Self::decode_key(e).cmp(&key))
+        Self::binary_search::<KP, _>(buf, |e| Self::decode_key(e).cmp(&key))
     }
 
     fn binary_search_by_value(buf: &[u8], value: V) -> StdResult<usize, usize> {
-        Self::binary_search(buf, |e| Self::decode_value(e).cmp(&value))
+        Self::binary_search::<DupNotAllowed, _>(buf, |e| Self::decode_value(e).cmp(&value))
     }
 
     fn decode_key(entry: &[u8]) -> K {
@@ -427,6 +414,19 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
             }
             Ordering::Greater => Ok(()),
         }
+    }
+
+    fn entry_by(&self, f: impl FnOnce(&[u8]) -> StdResult<usize, usize>) -> Option<(K, V)> {
+        let buf = self.used_buf();
+        let i = match f(buf) {
+            Ok(i) => i,
+            Err(i) => if i == 0 {
+                return None;
+            } else {
+                i - Self::ENTRY_LEN
+            }
+        };
+        Some(Self::decode_entry(&buf[i..]))
     }
 }
 
@@ -601,5 +601,22 @@ mod test {
         assert_matches!(err_kind(idx.push(101, 199)), ErrorKind::Index(Error::PushMisordered));
         assert_matches!(err_kind(idx.push(100, 203)), ErrorKind::Index(Error::PushMisordered));
         assert_eq!(idx.len(), 3);
+    }
+
+    #[test]
+    fn search_with_dup_allowed() {
+        let f = mktemp::Temp::new_file().unwrap();
+        let idx: Index<u64, u32, DupAllowed> = Index::open_or_create(&f, Mode::Growable {
+            preallocate: 5,
+            max_capacity: 5,
+        }).unwrap();
+        idx.push(101, 201).unwrap();
+        idx.push(101, 202).unwrap();
+        idx.push(101, 203).unwrap();
+        idx.push(102, 12345).unwrap();
+        assert_eq!(idx.value_by_key(101), Some(203));
+        assert_eq!(idx.value_by_key(100), None);
+        assert_eq!(idx.value_by_key(102), Some(12345));
+        assert_eq!(idx.entry_by_key(103), Some((102, 12345)));
     }
 }
