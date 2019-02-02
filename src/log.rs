@@ -159,15 +159,6 @@ impl Log {
 
         self.segments.back_mut().unwrap().push(entry, buf)
     }
-
-    fn find_segment_idx(&self, id: Id) -> Option<usize> {
-        let (a, b) = self.segments.as_slices();
-        let mut i = a.binary_search_by(|s| s.partial_cmp(&id).unwrap());
-        if i.is_err() {
-            i = b.binary_search_by(|s| s.partial_cmp(&id).unwrap());
-        }
-        i.ok()
-    }
 }
 
 #[cfg(test)]

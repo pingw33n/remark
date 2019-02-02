@@ -1,4 +1,4 @@
-use byteorder::{BigEndian, ByteOrder, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, ByteOrder, WriteBytesExt};
 use std::io;
 use std::io::prelude::*;
 use std::ops::{Range, RangeFrom};
@@ -75,10 +75,6 @@ impl<F: FieldType> Field<F> {
         v.set(&mut buf[self.pos..])
     }
 
-    pub fn read(&self, rd: &mut Read) -> io::Result<F> {
-        F::read(rd)
-    }
-
     pub fn write(&self, wr: &mut Write, v: F) -> io::Result<()> {
         v.write(wr)
     }
@@ -89,7 +85,6 @@ pub trait FieldType: Sized {
 
     fn get(buf: &impl Buf, i: usize) -> Self;
     fn set(&self, buf: &mut [u8]);
-    fn read(rd: &mut Read) -> io::Result<Self>;
     fn write(&self, wr: &mut Write) -> io::Result<()>;
 }
 
@@ -100,10 +95,6 @@ impl FieldType for u8 {
 
     fn set(&self, buf: &mut [u8]) {
         buf[0] = *self;
-    }
-
-    fn read(rd: &mut Read) -> io::Result<Self> {
-        rd.read_u8()
     }
 
     fn write(&self, wr: &mut Write) -> io::Result<()> {
@@ -120,10 +111,6 @@ impl FieldType for u16 {
         BigEndian::write_u16(buf, *self);
     }
 
-    fn read(rd: &mut Read) -> io::Result<Self> {
-        rd.read_u16::<BigEndian>()
-    }
-
     fn write(&self, wr: &mut Write) -> io::Result<()> {
         wr.write_u16::<BigEndian>(*self)
     }
@@ -136,10 +123,6 @@ impl FieldType for u32 {
 
     fn set(&self, buf: &mut [u8]) {
         BigEndian::write_u32(buf, *self);
-    }
-
-    fn read(rd: &mut Read) -> io::Result<Self> {
-        rd.read_u32::<BigEndian>()
     }
 
     fn write(&self, wr: &mut Write) -> io::Result<()> {
@@ -156,10 +139,6 @@ impl FieldType for u64 {
         BigEndian::write_u64(buf, *self);
     }
 
-    fn read(rd: &mut Read) -> io::Result<Self> {
-        rd.read_u64::<BigEndian>()
-    }
-
     fn write(&self, wr: &mut Write) -> io::Result<()> {
         wr.write_u64::<BigEndian>(*self)
     }
@@ -174,10 +153,6 @@ impl FieldType for Option<Id> {
         self.map(|v| v.as_u64()).unwrap_or(0).set(buf);
     }
 
-    fn read(rd: &mut Read) -> io::Result<Self> {
-        u64::read(rd).map(Id::new)
-    }
-
     fn write(&self, wr: &mut Write) -> io::Result<()> {
         self.map(|v| v.as_u64()).unwrap_or(0).write(wr)
     }
@@ -190,10 +165,6 @@ impl FieldType for Timestamp {
 
     fn set(&self, buf: &mut [u8]) {
         self.millis().set(buf);
-    }
-
-    fn read(rd: &mut Read) -> io::Result<Self> {
-        u64::read(rd).map(|v| v.into())
     }
 
     fn write(&self, wr: &mut Write) -> io::Result<()> {
