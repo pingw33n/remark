@@ -6,11 +6,10 @@ use std::ops::{Bound, RangeBounds};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::Timestamp;
 use crate::bytes::*;
 use crate::entry::BufEntry;
 use crate::entry::format;
-use crate::entry::message::Id;
+use crate::entry::message::{Id, Timestamp};
 use crate::error::*;
 use crate::file::*;
 use crate::index::{self as index, Index};

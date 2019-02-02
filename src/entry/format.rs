@@ -4,9 +4,8 @@ use std::io::prelude::*;
 use std::ops::{Range, RangeFrom};
 use std::marker::PhantomData;
 
-use super::message::Id;
+use super::message::{Id, Timestamp};
 use crate::bytes::Buf;
-use crate::Timestamp;
 
 macro_rules! fields {
     ($name:ident: $ty:tt = $pos:expr; $($rest:tt)*) => {

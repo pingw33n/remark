@@ -14,7 +14,7 @@ use std::result::{Result as StdResult};
 use std::slice;
 
 use crate::error::*;
-use crate::Timestamp;
+use crate::entry::message::Timestamp;
 
 #[derive(Clone, Debug, Eq, Fail, PartialEq)]
 pub enum Error {

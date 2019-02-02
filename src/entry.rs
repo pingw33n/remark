@@ -10,9 +10,8 @@ use std::ops::Range;
 use crate::error::*;
 use crate::file::FileRead;
 use crate::bytes::*;
-use crate::Timestamp;
+use crate::entry::message::{Id, Message, MessageBuilder, Timestamp};
 use crate::util::varint::{self, ReadExt, WriteExt};
-use message::{Id, Message, MessageBuilder};
 
 #[derive(Clone, Debug, Eq, Fail, PartialEq)]
 pub enum Error {
