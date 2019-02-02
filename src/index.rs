@@ -64,6 +64,18 @@ impl Field for u64 {
     }
 }
 
+impl Field for i64 {
+    const LEN: usize = mem::size_of::<i64>();
+
+    fn encode(&self, buf: &mut [u8]) {
+        BigEndian::write_i64(buf, *self);
+    }
+
+    fn decode(buf: &[u8]) -> Self {
+        BigEndian::read_i64(buf)
+    }
+}
+
 impl Field for Timestamp {
     const LEN: usize = u64::LEN;
 
@@ -72,7 +84,7 @@ impl Field for Timestamp {
     }
 
     fn decode(buf: &[u8]) -> Self {
-        u64::decode(buf).into()
+        i64::decode(buf).into()
     }
 }
 

@@ -94,12 +94,12 @@ impl ops::Sub<u64> for Id {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
-pub struct Timestamp(u64);
+pub struct Timestamp(i64);
 
 impl Timestamp {
     pub fn now() -> Self {
         let dur = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
-            .expect("system time couldn't be converted to unix epoch");
+            .expect("system time couldn't be converted to Timestamp");
         Self::from_duration(dur).unwrap()
     }
 
@@ -107,36 +107,40 @@ impl Timestamp {
         Self(0)
     }
 
-    pub fn from_duration(v: Duration) -> Option<Self> {
-        Some(Self(v.as_millis_u64()?))
+    pub fn min_value() -> Self {
+        Self(i64::min_value())
     }
 
-    pub fn millis(&self) -> u64 {
+    pub fn max_value() -> Self {
+        Self(i64::max_value())
+    }
+
+    pub fn from_duration(v: Duration) -> Option<Self> {
+        Some(Self(v.as_millis_u64().and_then(|v| cast::i64(v).ok())?))
+    }
+
+    pub fn millis(&self) -> i64 {
         self.0
     }
 
     pub fn checked_add(&self, duration: Duration) -> Option<Self> {
-        self.checked_add_millis(duration.as_millis_u64()?)
+        self.checked_add_millis(Self::from_duration(duration)?.0)
     }
 
-    pub fn checked_add_millis(&self, millis: u64) -> Option<Self> {
+    pub fn checked_add_millis(&self, millis: i64) -> Option<Self> {
         self.0.checked_add(millis).map(|v| v.into())
     }
 
     pub fn duration_since(&self, since: Timestamp) -> Option<Duration> {
-        self.0.checked_sub(since.0).map(Duration::from_millis)
+        self.0.checked_sub(since.0)
+            .and_then(|v| cast::u64(v).ok())
+            .map(Duration::from_millis)
     }
 }
 
-impl From<u64> for Timestamp {
-    fn from(v: u64) -> Self {
+impl From<i64> for Timestamp {
+    fn from(v: i64) -> Self {
         Self(v)
-    }
-}
-
-impl Into<Duration> for Timestamp {
-    fn into(self) -> Duration {
-        Duration::from_millis(self.0)
     }
 }
 
@@ -174,7 +178,7 @@ impl Message {
     pub fn read(rd: &mut impl Read, next_id: Id, next_timestamp: Timestamp) -> Result<Self> {
         let len = rd.read_u32_varint().context(Error::Io)?;
         let id_delta = rd.read_u32_varint().context(Error::Io)?;
-        let timestamp_delta = rd.read_u64_varint().context(Error::Io)?;
+        let timestamp_delta = rd.read_i64_varint().context(Error::Io)?;
         let headers = Headers::read(rd)?;
         let key = read_opt_bstring(rd)?;
         let value = read_opt_bstring(rd)?;
@@ -204,7 +208,7 @@ impl Message {
         assert!(self.id.checked_delta(next_id)
             .filter(|&v| v <= u32::max_value() as u64)
             .is_some());
-        assert!(self.timestamp >= next_timestamp);
+        assert!(self.timestamp >= next_timestamp, "{:?} {:?}", self.timestamp, next_timestamp);
         MessageWriter {
             msg: self,
             next_id,
@@ -224,14 +228,13 @@ impl MessageWriter<'_> {
         cast::u32(self.msg.id.checked_delta(self.next_id).unwrap()).unwrap()
     }
 
-    pub fn timestamp_delta(&self) -> u64 {
-        self.msg.timestamp.duration_since(self.next_timestamp).unwrap()
-            .as_millis_u64().unwrap()
+    pub fn timestamp_delta(&self) -> i64 {
+        self.msg.timestamp.millis().checked_sub(self.next_timestamp.millis()).unwrap()
     }
 
     pub fn encoded_len(&self) -> usize {
         let l = varint::encoded_len(self.id_delta() as u64) as usize +
-            varint::encoded_len(self.timestamp_delta()) as usize +
+            varint::encoded_len_i64(self.timestamp_delta()) as usize +
             self.msg.headers.encoded_len() +
             encoded_len_opt_bstring(self.msg.key.as_ref()) +
             encoded_len_opt_bstring(self.msg.value.as_ref());
@@ -241,7 +244,7 @@ impl MessageWriter<'_> {
     pub fn write(&self, wr: &mut impl Write) -> Result<()> {
         wr.write_u32_varint(cast::u32(self.encoded_len()).unwrap()).context(Error::Io)?;
         wr.write_u32_varint(self.id_delta()).context(Error::Io)?;
-        wr.write_u64_varint(self.timestamp_delta()).context(Error::Io)?;
+        wr.write_i64_varint(self.timestamp_delta()).context(Error::Io)?;
         self.msg.headers.write(wr)?;
         write_opt_bstring(wr, self.msg.key.as_ref())?;
         write_opt_bstring(wr, self.msg.value.as_ref())?;
@@ -421,7 +424,6 @@ mod test {
                         .unwrap();
                     assert_eq!(&actual, msg);
                 }
-
             }
         }
     }

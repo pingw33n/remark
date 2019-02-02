@@ -143,6 +143,20 @@ impl FieldType for u64 {
     }
 }
 
+impl FieldType for i64 {
+    fn get(buf: &impl Buf, i: usize) -> Self {
+        buf.get_i64::<BigEndian>(i)
+    }
+
+    fn set(&self, buf: &mut [u8]) {
+        BigEndian::write_i64(buf, *self);
+    }
+
+    fn write(&self, wr: &mut Write) -> io::Result<()> {
+        wr.write_i64::<BigEndian>(*self)
+    }
+}
+
 impl FieldType for Option<Id> {
     fn get(buf: &impl Buf, i: usize) -> Self {
         Id::new(u64::get(buf, i))
@@ -159,7 +173,7 @@ impl FieldType for Option<Id> {
 
 impl FieldType for Timestamp {
     fn get(buf: &impl Buf, i: usize) -> Self {
-        u64::get(buf, i).into()
+        i64::get(buf, i).into()
     }
 
     fn set(&self, buf: &mut [u8]) {

@@ -383,7 +383,6 @@ impl BufEntryBuilder {
 
     pub fn build(mut self) -> (BufEntry, BytesMut) {
         let id_range = self.get_id_range().expect("can't build dense entry without messages");
-        dbg!(id_range);
         let (header_crc, body_crc) = self.write_prolog(id_range);
         let frame_len = self.get_encoded_len();
         (BufEntry {
