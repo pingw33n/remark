@@ -1,5 +1,4 @@
 pub(in crate) mod format;
-pub mod message;
 
 use byteorder::{BigEndian, ReadBytesExt};
 use std::borrow::Cow;
@@ -10,8 +9,7 @@ use std::ops::Range;
 use crate::error::*;
 use crate::file::FileRead;
 use crate::bytes::*;
-use crate::entry::message::{Id, Message, MessageBuilder, Timestamp};
-use crate::util::varint::{self, ReadExt, WriteExt};
+use crate::message::{Id, Message, MessageBuilder, Timestamp};
 
 #[derive(Clone, Debug, Eq, Fail, PartialEq)]
 pub enum Error {
@@ -26,9 +24,6 @@ pub enum Error {
 
     #[fail(display = "{}", _0)]
     BadBody(Cow<'static, str>),
-
-    #[fail(display = "{}", _0)]
-    BadMessage(Cow<'static, str>),
 
     #[fail(display = "IO error")]
     Io,
@@ -241,8 +236,7 @@ impl<R: Read> Iterator for BufEntryIter<R> {
                 if self.left > 0 {
                     match msg.id.checked_add(1) {
                         Some(next_id) => self.next_id = next_id,
-                        None => return Some(Err(
-                            Error::BadMessage("message ID overflowed u64".into()).into())),
+                        None => return Some(Err(crate::message::Error::IdOverflow.into())),
                     }
                 }
                 Ok(msg)
@@ -446,58 +440,4 @@ impl BufEntryBuilder {
 
         (header_crc, body_crc)
     }
-}
-
-fn encoded_len_bstring(buf: &[u8]) -> usize {
-    varint::encoded_len(buf.len() as u64) as usize +
-        buf.len()
-}
-
-fn encoded_len_opt_bstring<T: AsRef<[u8]>>(buf: Option<T>) -> usize {
-    if let Some(buf) = buf {
-        encoded_len_bstring(buf.as_ref())
-    } else {
-        varint::encoded_len(0) as usize
-    }
-}
-
-fn read_opt_bstring(rd: &mut impl Read) -> Result<Option<Vec<u8>>> {
-    let len = rd.read_u32_varint().context(Error::Io)?;
-    if len == 0 {
-        Ok(None)
-    } else {
-        let mut vec = Vec::with_capacity(cast::usize(len) - 1);
-        vec.resize(vec.capacity(), 0);
-        rd.read_exact(&mut vec).context(Error::Io)?;
-        Ok(Some(vec))
-    }
-}
-
-fn read_opt_string(rd: &mut impl Read) -> Result<Option<String>> {
-    if let Some(s) = read_opt_bstring(rd)? {
-        String::from_utf8(s).map(Some).map_err(|_|
-            Error::BadMessage("malformed UTF-8 string".into()).into_error())
-    } else {
-        Ok(None)
-    }
-}
-
-fn write_bstring(wr: &mut impl Write, buf: &[u8]) -> Result<()> {
-    wr.write_u32_varint(cast::u32(buf.len()).unwrap().checked_add(1).unwrap())
-        .context(Error::Io)?;
-    wr.write_all(buf).context(Error::Io)?;
-    Ok(())
-}
-
-fn write_opt_bstring<T: AsRef<[u8]>>(wr: &mut impl Write, buf: Option<T>) -> Result<()> {
-    if let Some(buf) = buf {
-        write_bstring(wr, buf.as_ref())
-    } else {
-        wr.write_u32_varint(0).context(Error::Io)?;
-        Ok(())
-    }
-}
-
-fn crc(buf: &[u8]) -> u32 {
-    crc::crc32::checksum_castagnoli(buf)
 }

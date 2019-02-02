@@ -118,6 +118,9 @@ pub enum ErrorKind {
     Index(crate::index::Error),
 
     #[fail(display = "{}", _0)]
+    Message(crate::message::Error),
+
+    #[fail(display = "{}", _0)]
     Log(crate::log::Error),
 
     #[fail(display = "{}", _0)]
@@ -161,6 +164,7 @@ impl_from!(
     crate::entry::Error
     crate::index::Error
     crate::log::Error
+    crate::message::Error
     crate::segment::Error
 );
 
@@ -168,5 +172,6 @@ impl_kind_from!(
     Entry => crate::entry::Error,
     Index => crate::index::Error,
     Log => crate::log::Error,
+    Message => crate::message::Error,
     Segment => crate::segment::Error,
 );

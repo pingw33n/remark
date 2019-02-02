@@ -9,10 +9,10 @@ use std::sync::Arc;
 use crate::bytes::*;
 use crate::entry::BufEntry;
 use crate::entry::format;
-use crate::entry::message::{Id, Timestamp};
 use crate::error::*;
 use crate::file::*;
 use crate::index::{self as index, Index};
+use crate::message::{Id, Timestamp};
 use std::borrow::Borrow;
 
 pub const DATA_FILE_SUFFIX: &'static str = ".data";

@@ -7,8 +7,8 @@ use std::collections::VecDeque;
 use crate::bytes::*;
 use crate::entry::BufEntry;
 use crate::entry::format::MIN_FRAME_LEN;
-use crate::entry::message::Id;
 use crate::error::*;
+use crate::message::Id;
 use crate::segment::{self, Segment};
 use crate::util::file_mutex::FileMutex;
 

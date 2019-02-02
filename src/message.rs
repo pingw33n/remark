@@ -4,10 +4,39 @@ use std::num::NonZeroU64;
 use std::ops;
 use std::time::{Duration, SystemTime};
 
-use super::*;
-use super::Error;
+use crate::error::*;
 use crate::util::DurationExt;
 use crate::util::varint::{self, ReadExt, WriteExt};
+
+#[derive(Clone, Debug, Eq, Fail, PartialEq)]
+pub enum Error {
+    #[fail(display = "stored message id overflows max value")]
+    IdOverflow,
+
+    #[fail(display = "stored message timestamp overflows max value")]
+    TimestampOverflow,
+
+    #[fail(display = "message's stored len and actual len differ")]
+    LenMismatch,
+
+    #[fail(display = "stored message header name is null")]
+    HeaderNameIsNull,
+
+    #[fail(display = "stored message header value is null")]
+    HeaderValueIsNull,
+
+    #[fail(display = "malformed UTF-8 string")]
+    MalformedUtf8,
+
+    #[fail(display = "IO error")]
+    Io,
+}
+
+impl Error {
+    pub fn into_error(self) -> crate::error::Error {
+        self.into()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Id(NonZeroU64);
@@ -151,9 +180,9 @@ impl Message {
         let value = read_opt_bstring(rd)?;
 
         let id = next_id.checked_add(id_delta as u64).ok_or_else(||
-            Error::BadMessage("stored message id overflows u64".into()).into_error())?;
+            Error::IdOverflow.into_error())?;
         let timestamp = next_timestamp.checked_add_millis(timestamp_delta).ok_or_else(||
-            Error::BadMessage("stored message timestamp overflows u64".into()).into_error())?;
+            Error::TimestampOverflow.into_error())?;
 
         let r = Self {
             id,
@@ -165,8 +194,7 @@ impl Message {
 
         // TODO should be already able to tell how much bytes was actually read from rd.
         if r.writer(next_id, next_timestamp).encoded_len() != cast::usize(len) {
-            return Err(Error::BadMessage("message's stored len and actual len differ"
-                .into()).into());
+            return Err(Error::LenMismatch.into());
         }
 
         Ok(r)
@@ -265,10 +293,8 @@ impl Header {
     }
 
     pub fn read(rd: &mut impl Read) -> Result<Self> {
-        let name = read_opt_string(rd)?.ok_or_else(||
-            Error::BadMessage("stored message header name is null".into()).into_error())?;
-        let value = read_opt_bstring(rd)?.ok_or_else(||
-            Error::BadMessage("stored message header value is null".into()).into_error())?;
+        let name = read_opt_string(rd)?.ok_or_else(|| Error::HeaderNameIsNull.into_error())?;
+        let value = read_opt_bstring(rd)?.ok_or_else(|| Error::HeaderValueIsNull.into_error())?;
         Ok(Self {
             name,
             value,
@@ -278,6 +304,55 @@ impl Header {
     pub fn write(&self, wr: &mut impl Write) -> Result<()> {
         write_bstring(wr, self.name.as_bytes())?;
         write_bstring(wr, &self.value)
+    }
+}
+
+fn encoded_len_bstring(buf: &[u8]) -> usize {
+    varint::encoded_len(buf.len() as u64) as usize +
+        buf.len()
+}
+
+fn encoded_len_opt_bstring<T: AsRef<[u8]>>(buf: Option<T>) -> usize {
+    if let Some(buf) = buf {
+        encoded_len_bstring(buf.as_ref())
+    } else {
+        varint::encoded_len(0) as usize
+    }
+}
+
+fn read_opt_bstring(rd: &mut impl Read) -> Result<Option<Vec<u8>>> {
+    let len = rd.read_u32_varint().context(Error::Io)?;
+    if len == 0 {
+        Ok(None)
+    } else {
+        let mut vec = Vec::with_capacity(cast::usize(len) - 1);
+        vec.resize(vec.capacity(), 0);
+        rd.read_exact(&mut vec).context(Error::Io)?;
+        Ok(Some(vec))
+    }
+}
+
+fn read_opt_string(rd: &mut impl Read) -> Result<Option<String>> {
+    if let Some(s) = read_opt_bstring(rd)? {
+        String::from_utf8(s).map(Some).map_err(|_| Error::MalformedUtf8.into_error())
+    } else {
+        Ok(None)
+    }
+}
+
+fn write_bstring(wr: &mut impl Write, buf: &[u8]) -> Result<()> {
+    wr.write_u32_varint(cast::u32(buf.len()).unwrap().checked_add(1).unwrap())
+        .context(Error::Io)?;
+    wr.write_all(buf).context(Error::Io)?;
+    Ok(())
+}
+
+fn write_opt_bstring<T: AsRef<[u8]>>(wr: &mut impl Write, buf: Option<T>) -> Result<()> {
+    if let Some(buf) = buf {
+        write_bstring(wr, buf.as_ref())
+    } else {
+        wr.write_u32_varint(0).context(Error::Io)?;
+        Ok(())
     }
 }
 

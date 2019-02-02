@@ -10,5 +10,6 @@ pub mod error;
 pub mod file;
 pub mod index;
 pub mod log;
+pub mod message;
 pub mod segment;
 pub mod util;

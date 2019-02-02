@@ -4,8 +4,8 @@ use std::io::prelude::*;
 use std::ops::{Range, RangeFrom};
 use std::marker::PhantomData;
 
-use super::message::{Id, Timestamp};
 use crate::bytes::Buf;
+use crate::message::{Id, Timestamp};
 
 macro_rules! fields {
     ($name:ident: $ty:tt = $pos:expr; $($rest:tt)*) => {
@@ -169,4 +169,8 @@ impl FieldType for Timestamp {
     fn write(&self, wr: &mut Write) -> io::Result<()> {
         self.millis().write(wr)
     }
+}
+
+pub fn crc(buf: &[u8]) -> u32 {
+    crc::crc32::checksum_castagnoli(buf)
 }
