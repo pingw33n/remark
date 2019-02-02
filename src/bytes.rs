@@ -8,9 +8,15 @@ use std::cmp;
 pub trait Buf: AsRef<[u8]> + ops::Deref<Target=[u8]> {
     fn as_slice(&self) -> &[u8];
     fn get_u8(&self, i: usize) -> u8;
+    fn get_i8(&self, i: usize) -> i8 {
+        self.get_u8(i) as i8
+    }
     fn get_u16<B: ByteOrder>(&self, i: usize) -> u16;
+    fn get_i16<B: ByteOrder>(&self, i: usize) -> i16;
     fn get_u32<B: ByteOrder>(&self, i: usize) -> u32;
+    fn get_i32<B: ByteOrder>(&self, i: usize) -> i32;
     fn get_u64<B: ByteOrder>(&self, i: usize) -> u64;
+    fn get_i64<B: ByteOrder>(&self, i: usize) -> i64;
 }
 
 macro_rules! impl_get {
@@ -46,8 +52,11 @@ impl Buf for Bytes {
     }
 
     impl_get!(get_u16, read_u16: u16);
+    impl_get!(get_i16, read_i16: i16);
     impl_get!(get_u32, read_u32: u32);
+    impl_get!(get_i32, read_i32: i32);
     impl_get!(get_u64, read_u64: u64);
+    impl_get!(get_i64, read_i64: i64);
 }
 
 impl AsRef<[u8]> for Bytes {
@@ -163,9 +172,16 @@ impl BytesMut {
         self.as_mut_slice()[i] = v;
     }
 
+    pub fn set_i8(&mut self, i: usize, v: i8) {
+        self.set_u8(i, v as u8);
+    }
+
     impl_set!(set_u16, write_u16: u16);
+    impl_set!(set_i16, write_i16: i16);
     impl_set!(set_u32, write_u32: u32);
+    impl_set!(set_i32, write_i32: i32);
     impl_set!(set_u64, write_u64: u64);
+    impl_set!(set_i64, write_i64: i64);
 }
 
 impl Buf for BytesMut {
@@ -178,8 +194,11 @@ impl Buf for BytesMut {
     }
 
     impl_get!(get_u16, read_u16: u16);
+    impl_get!(get_i16, read_i16: i16);
     impl_get!(get_u32, read_u32: u32);
+    impl_get!(get_i32, read_i32: i32);
     impl_get!(get_u64, read_u64: u64);
+    impl_get!(get_i64, read_i64: i64);
 }
 
 impl AsRef<[u8]> for BytesMut {
