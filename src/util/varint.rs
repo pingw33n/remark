@@ -1,5 +1,29 @@
 use std::io;
 
+pub fn encode_zigzag_i16(v: i16) -> u16 {
+    encode_zigzag_i64(v as i64) as u16
+}
+
+pub fn encode_zigzag_i32(v: i32) -> u32 {
+    encode_zigzag_i64(v as i64) as u32
+}
+
+pub fn encode_zigzag_i64(v: i64) -> u64 {
+    ((v << 1) ^ (v >> 63)) as u64
+}
+
+pub fn decode_zigzag_i16(v: u16) -> i16 {
+    decode_zigzag_i64(v as u64) as i16
+}
+
+pub fn decode_zigzag_i32(v: u32) -> i32 {
+    decode_zigzag_i64(v as u64) as i32
+}
+
+pub fn decode_zigzag_i64(v: u64) -> i64 {
+    ((v >> 1) as i64) ^ (-((v & 1) as i64))
+}
+
 macro_rules! impl_enc {
     ($v:ident, $buf:ident => +$($rest:tt)*) => {{
         let (len, v) = impl_enc!(@impl $v, $buf, 0 => $($rest)*);
@@ -24,12 +48,24 @@ pub fn encode_u16_into(v: u16, buf: &mut [u8]) -> usize {
     impl_enc!(v, buf => +++)
 }
 
+pub fn encode_i16_into(v: i16, buf: &mut [u8]) -> usize {
+    encode_u16_into(encode_zigzag_i16(v), buf)
+}
+
 pub fn encode_u32_into(v: u32, buf: &mut [u8]) -> usize {
     impl_enc!(v, buf => +++++)
 }
 
+pub fn encode_i32_into(v: i32, buf: &mut [u8]) -> usize {
+    encode_u32_into(encode_zigzag_i32(v), buf)
+}
+
 pub fn encode_u64_into(v: u64, buf: &mut [u8]) -> usize {
     impl_enc!(v, buf => ++++++++++)
+}
+
+pub fn encode_i64_into(v: i64, buf: &mut [u8]) -> usize {
+    encode_u64_into(encode_zigzag_i64(v), buf)
 }
 
 pub fn encode_u16(v: u16) -> ([u8; 3], usize) {
@@ -38,16 +74,28 @@ pub fn encode_u16(v: u16) -> ([u8; 3], usize) {
     (buf, len)
 }
 
+pub fn encode_i16(v: i16) -> ([u8; 3], usize) {
+    encode_u16(encode_zigzag_i16(v))
+}
+
 pub fn encode_u32(v: u32) -> ([u8; 5], usize) {
     let mut buf = [0u8; 5];
     let len = encode_u32_into(v, &mut buf);
     (buf, len)
 }
 
+pub fn encode_i32(v: i32) -> ([u8; 5], usize) {
+    encode_u32(encode_zigzag_i32(v))
+}
+
 pub fn encode_u64(v: u64) -> ([u8; 10], usize) {
     let mut buf = [0u8; 10];
     let len = encode_u64_into(v, &mut buf);
     (buf, len)
+}
+
+pub fn encode_i64(v: i64) -> ([u8; 10], usize) {
+    encode_u64(encode_zigzag_i64(v))
 }
 
 macro_rules! impl_dec {
@@ -74,12 +122,27 @@ pub fn decode_u16(buf: &[u8]) -> (u16, usize) {
     impl_dec!(buf: u16 => +++)
 }
 
+pub fn decode_i16(buf: &[u8]) -> (i16, usize) {
+    let (v, len) = decode_u16(buf);
+    (decode_zigzag_i16(v), len)
+}
+
 pub fn decode_u32(buf: &[u8]) -> (u32, usize) {
     impl_dec!(buf: u32 => +++++)
 }
 
+pub fn decode_i32(buf: &[u8]) -> (i32, usize) {
+    let (v, len) = decode_u32(buf);
+    (decode_zigzag_i32(v), len)
+}
+
 pub fn decode_u64(buf: &[u8]) -> (u64, usize) {
     impl_dec!(buf: u64 => ++++++++++)
+}
+
+pub fn decode_i64(buf: &[u8]) -> (i64, usize) {
+    let (v, len) = decode_u64(buf);
+    (decode_zigzag_i64(v), len)
 }
 
 pub fn encoded_len(v: u64) -> u32 {
@@ -93,6 +156,10 @@ pub fn encoded_len(v: u64) -> u32 {
     else if v < 0x100000000000000 { 8 }
     else if v < 0x8000000000000000 { 9 }
     else { 10 }
+}
+
+pub fn encoded_len_i64(v: i64) -> u32 {
+    encoded_len(encode_zigzag_i64(v))
 }
 
 fn read_varint<R: ?Sized + io::Read>(rd: &mut R, max_len: u32) -> io::Result<u64> {
@@ -116,12 +183,24 @@ pub trait ReadExt: io::Read {
         read_varint(self, 2).map(|v| v as u16)
     }
 
+    fn read_i16_varint(&mut self) -> io::Result<i16> {
+        self.read_u16_varint().map(decode_zigzag_i16)
+    }
+
     fn read_u32_varint(&mut self) -> io::Result<u32> {
         read_varint(self, 4).map(|v| v as u32)
     }
 
+    fn read_i32_varint(&mut self) -> io::Result<i32> {
+        self.read_u32_varint().map(decode_zigzag_i32)
+    }
+
     fn read_u64_varint(&mut self) -> io::Result<u64> {
         read_varint(self, 8).map(|v| v as u64)
+    }
+
+    fn read_i64_varint(&mut self) -> io::Result<i64> {
+        self.read_u64_varint().map(decode_zigzag_i64)
     }
 }
 
@@ -133,14 +212,26 @@ pub trait WriteExt: io::Write {
         self.write_all(&buf[..len]).map(|_| len)
     }
 
+    fn write_i16_varint(&mut self, v: i16) -> io::Result<usize> {
+        self.write_u16_varint(encode_zigzag_i16(v))
+    }
+
     fn write_u32_varint(&mut self, v: u32) -> io::Result<usize> {
         let (buf, len) = encode_u32(v);
         self.write_all(&buf[..len]).map(|_| len)
     }
 
+    fn write_i32_varint(&mut self, v: i32) -> io::Result<usize> {
+        self.write_u32_varint(encode_zigzag_i32(v))
+    }
+
     fn write_u64_varint(&mut self, v: u64) -> io::Result<usize> {
         let (buf, len) = encode_u64(v);
         self.write_all(&buf[..len]).map(|_| len)
+    }
+
+    fn write_i64_varint(&mut self, v: i64) -> io::Result<usize> {
+        self.write_u64_varint(encode_zigzag_i64(v))
     }
 }
 
@@ -149,6 +240,37 @@ impl<T: io::Write> WriteExt for T {}
 #[cfg(test)]
 mod test {
     use super::*;
+
+    macro_rules! zigzag_data {
+        ($ity:tt => $uty:tt) => {
+            &[
+                (0, 0),
+                (-1, 1),
+                (1, 2),
+                (-2, 3),
+                ($ity::min_value(), $uty::max_value()),
+                ($ity::max_value(), $uty::max_value() - 1),
+            ]
+        };
+    }
+
+    macro_rules! zigzag_test {
+        ($n:ident, $enc:ident, $dec:ident, $ity:tt => $uty:tt) => {
+            #[test]
+            fn $n() {
+                let d = zigzag_data!($ity => $uty);
+                for &(v, enc) in d {
+                    let actual_enc = $enc(v);
+                    assert_eq!(actual_enc, enc);
+                    assert_eq!($dec(enc), v);
+                }
+            }
+        };
+    }
+
+    zigzag_test!(encode_decode_zigzag_i16, encode_zigzag_i16, decode_zigzag_i16, i16 => u16);
+    zigzag_test!(encode_decode_zigzag_i32, encode_zigzag_i32, decode_zigzag_i32, i32 => u32);
+    zigzag_test!(encode_decode_zigzag_i64, encode_zigzag_i64, decode_zigzag_i64, i64 => u64);
 
     #[test]
     fn encode_decode_u16() {
