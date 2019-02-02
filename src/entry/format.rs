@@ -1,7 +1,7 @@
 use byteorder::{BigEndian, ByteOrder, WriteBytesExt};
 use std::io;
 use std::io::prelude::*;
-use std::ops::{Range, RangeFrom};
+use std::ops::Range;
 use std::marker::PhantomData;
 
 use crate::bytes::Buf;
@@ -29,13 +29,13 @@ macro_rules! fields {
     (@impl $pos:expr =>) => {};
 }
 
-type OptId = Option<Id>;
+type OptionId = Option<Id>;
 
 fields! {
     FRAME_LEN: u32 = 0;
     HEADER_CRC: u32;
     VERSION: u8;
-    START_ID: OptId;
+    START_ID: OptionId;
     END_ID_DELTA: u32;
     FIRST_TIMESTAMP: Timestamp;
     LAST_TIMESTAMP: Timestamp;
@@ -52,9 +52,11 @@ pub const FRAME_PROLOG_FIXED_LEN: usize = VERSION.next;
 pub const FRAME_PROLOG_LEN: usize = MESSAGE_COUNT.next;
 
 pub const HEADER_CRC_RANGE: Range<usize> = HEADER_CRC.next..BODY_CRC.pos;
-pub const BODY_CRC_RANGE: RangeFrom<usize> = BODY_CRC.next..;
+pub const BODY_CRC_START: usize = BODY_CRC.next;
 
 pub const MIN_FRAME_LEN: usize = MESSAGE_COUNT.next;
+
+pub const MESSAGES_START: usize = MESSAGE_COUNT.next;
 
 pub const CURRENT_VERSION: u8 = 1;
 

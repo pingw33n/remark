@@ -127,6 +127,18 @@ pub enum ErrorKind {
     Segment(crate::segment::Error),
 }
 
+impl From<crate::entry::BadMessages> for ErrorKind {
+    fn from(v: crate::entry::BadMessages) -> Self {
+        ErrorKind::Entry(crate::entry::Error::BadMessages(v))
+    }
+}
+
+impl From<crate::entry::BadBody> for ErrorKind {
+    fn from(v: crate::entry::BadBody) -> Self {
+        ErrorKind::Entry(crate::entry::Error::BadBody(v))
+    }
+}
+
 macro_rules! impl_from {
     ($($ty:ty) *) => {
         $(impl From<$ty> for Error {
@@ -162,6 +174,8 @@ macro_rules! impl_kind_from {
 impl_from!(
     ErrorKind
     crate::entry::Error
+    crate::entry::BadBody
+    crate::entry::BadMessages
     crate::index::Error
     crate::log::Error
     crate::message::Error

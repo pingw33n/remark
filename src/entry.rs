@@ -4,7 +4,6 @@ use byteorder::{BigEndian, ReadBytesExt};
 use std::borrow::Cow;
 use std::io::SeekFrom;
 use std::io::prelude::*;
-use std::ops::Range;
 
 use crate::error::*;
 use crate::file::FileRead;
@@ -14,16 +13,19 @@ use crate::message::{Id, Message, MessageBuilder, Timestamp};
 #[derive(Clone, Debug, Eq, Fail, PartialEq)]
 pub enum Error {
     #[fail(display = "{}", _0)]
-    BadFraming(Cow<'static, str>),
+    BadBody(BadBody),
 
     #[fail(display = "{}", _0)]
-    BadVersion(Cow<'static, str>),
+    BadFraming(Cow<'static, str>),
 
     #[fail(display = "{}", _0)]
     BadHeader(Cow<'static, str>),
 
     #[fail(display = "{}", _0)]
-    BadBody(Cow<'static, str>),
+    BadMessages(BadMessages),
+
+    #[fail(display = "{}", _0)]
+    BadVersion(Cow<'static, str>),
 
     #[fail(display = "IO error")]
     Io,
@@ -35,7 +37,39 @@ impl Error {
     }
 }
 
-pub type BufRange = Range<usize>;
+#[derive(Clone, Debug, Eq, Fail, PartialEq)]
+pub enum BadBody {
+    #[fail(display = "entry body CRC check failed")]
+    BadCrc,
+
+    #[fail(display = "found garbage after message sequence")]
+    TrailingGarbage,
+}
+
+#[derive(Clone, Debug, Eq, Fail, PartialEq)]
+pub enum BadMessages {
+    #[fail(display = "message IDs must have no gaps")]
+    DenseRequired,
+
+    #[fail(display = "all message timestamps must be equal to the first_timestamp")]
+    SingleTimestampRequired,
+
+    #[fail(display = "last message timestamp differs from the one in the entry header")]
+    FirstTimestampMismatch,
+
+    #[fail(display = "last message timestamp differs from the one in the entry header")]
+    LastTimestampMismatch,
+
+    #[fail(display = "message ID overflow")]
+    IdOverflow,
+}
+
+pub struct ValidBody {
+    pub dense: bool,
+
+    /// Effectively this requires all `timestamp_delta`s are zero.
+    pub single_timestamp: bool,
+}
 
 #[derive(Debug)]
 pub struct BufEntry {
@@ -49,7 +83,6 @@ pub struct BufEntry {
     term: u64,
     body_crc: u32,
     message_count: u32,
-    body: BufRange,
 }
 
 // Some sane value.
@@ -107,11 +140,12 @@ impl BufEntry {
 
         let frame_len = cast::usize(FRAME_LEN.get(buf));
         Self::check_frame_len(frame_len)?;
-        if buf.len() < frame_len {
-            return Ok(None);
-        }
 
         let header_crc = HEADER_CRC.get(buf);
+        let actual_header_crc = crc(&buf[format::HEADER_CRC_RANGE]);
+        if header_crc != actual_header_crc {
+            return Err(Error::BadHeader("header CRC check failed".into()).into());
+        }
 
         let version = VERSION.get(buf);
         if version != CURRENT_VERSION {
@@ -125,14 +159,29 @@ impl BufEntry {
         let start_id = START_ID.get(buf).ok_or_else(||
             Error::BadHeader("invalid start_id (must not be 0)".into()).into_error())?;
         let end_id_delta = END_ID_DELTA.get(buf);
+        let end_id = start_id.checked_add(cast::u64(end_id_delta)).ok_or_else(||
+            Error::BadHeader("end_id overflows u64".into()).into_error())?;
+
         let first_timestamp = FIRST_TIMESTAMP.get(buf);
         let last_timestamp = LAST_TIMESTAMP.get(buf);
+        if last_timestamp < first_timestamp {
+            return Err(Error::BadHeader("last_timestamp is less than first_timestamp"
+                .into()).into());
+        }
 
         let flags = FLAGS.get(buf);
         let term = TERM.get(buf);
         let body_crc = BODY_CRC.get(buf);
+
         let message_count = MESSAGE_COUNT.get(buf);
-        let messages = FRAME_PROLOG_LEN..frame_len;
+        let id_count = cast::u64(end_id_delta) + 1;
+        if cast::u64(message_count) > id_count  {
+            return Err(Error::BadHeader(format!(
+                "(start_id, end_id) range is inconsistent with message_count: \
+                {} ID(s) in ({}, {}) range while message_count is {}",
+                id_count, start_id, end_id, message_count)
+                .into()).into());
+        }
 
         Ok(Some(Self {
             frame_len,
@@ -145,7 +194,6 @@ impl BufEntry {
             term,
             body_crc,
             message_count,
-            body: messages,
         }))
     }
 
@@ -156,16 +204,15 @@ impl BufEntry {
 //        Ok(())
 //    }
 
-    pub fn encoded_frame_len(&self) -> usize {
-        format::FRAME_PROLOG_FIXED_LEN + self.body.len()
-    }
-
-    pub fn iter(&self, buf: &Bytes) -> BufEntryIter<Cursor<Bytes>> {
+    pub fn iter<T: Buf>(&self, buf: T) -> BufEntryIter<Cursor<T>> {
+        assert!(buf.len() >= self.frame_len);
+        let mut rd = Cursor::new(buf);
+        rd.set_position(format::MESSAGES_START);
         BufEntryIter {
             next_id: self.start_id,
             next_timestamp: self.first_timestamp,
             left: self.message_count,
-            rd: Cursor::new(buf.clone())
+            rd,
         }
     }
 
@@ -214,6 +261,48 @@ impl BufEntry {
         format::FIRST_TIMESTAMP.set(&mut *buf, self.first_timestamp);
         format::LAST_TIMESTAMP.set(&mut *buf, self.last_timestamp);
     }
+
+    pub fn validate_body(&self, buf: &impl Buf, options: ValidBody) -> Result<()> {
+        assert!(buf.len() >= self.frame_len, "invalid buf");
+
+        if self.body_crc != crc(&buf[format::BODY_CRC_START..self.frame_len]) {
+            return Err(BadBody::BadCrc.into());
+        }
+
+        if options.dense && cast::u64(self.message_count) !=
+                cast::u64(self.end_id_delta) + 1 {
+            return Err(BadMessages::DenseRequired.into());
+        }
+
+        let buf = &buf[..self.frame_len];
+        let mut rd = Cursor::new(buf);
+        rd.set_position(format::MESSAGES_START);
+        let mut next_id = self.start_id;
+        let mut next_timestamp = self.first_timestamp;
+        for i in 0..self.message_count {
+            // TODO implement more efficient reading of message specifically for validation.
+            let msg = Message::read(&mut rd, next_id, next_timestamp)
+                .more_context("reading message for validation")?;
+            if i == 0 && msg.timestamp != self.first_timestamp {
+                return Err(BadMessages::FirstTimestampMismatch.into());
+            }
+            if options.dense && msg.id - next_id != 0 {
+                return Err(BadMessages::DenseRequired.into());
+            }
+            if options.single_timestamp && msg.timestamp != self.first_timestamp {
+                return Err(BadMessages::SingleTimestampRequired.into());
+            }
+            next_id += 1;
+            next_timestamp = msg.timestamp;
+        }
+        if next_timestamp != self.last_timestamp {
+            return Err(BadMessages::LastTimestampMismatch.into());
+        }
+        if rd.available() > 0 {
+            return Err(BadBody::TrailingGarbage.into())
+        }
+        Ok(())
+    }
 }
 
 pub struct BufEntryIter<R> {
@@ -236,7 +325,7 @@ impl<R: Read> Iterator for BufEntryIter<R> {
                 if self.left > 0 {
                     match msg.id.checked_add(1) {
                         Some(next_id) => self.next_id = next_id,
-                        None => return Some(Err(crate::message::Error::IdOverflow.into())),
+                        None => return Some(Err(BadMessages::IdOverflow.into())),
                     }
                 }
                 Ok(msg)
@@ -244,11 +333,6 @@ impl<R: Read> Iterator for BufEntryIter<R> {
             Err(e) => Err(e),
         })
     }
-}
-
-pub struct BufHeader {
-    pub name: BufRange,
-    pub value: BufRange,
 }
 
 pub struct BufEntryBuilder {
@@ -377,6 +461,14 @@ impl BufEntryBuilder {
         self
     }
 
+    pub fn messages(&mut self, vec: &mut Vec<MessageBuilder>) -> &mut Self {
+        for m in vec.drain(..) {
+            self.message(m);
+        }
+
+        self
+    }
+
     fn id_delta(id_range: (Id, Id)) -> u32 {
         cast::u32(id_range.1 - id_range.0).unwrap()
     }
@@ -396,7 +488,6 @@ impl BufEntryBuilder {
             term: self.term,
             body_crc,
             message_count: self.message_count,
-            body: format::FRAME_PROLOG_LEN..frame_len,
         }, self.buf)
     }
 
@@ -431,12 +522,147 @@ impl BufEntryBuilder {
 
         MESSAGE_COUNT.write(wr, self.message_count).unwrap();
 
-        let header_crc = crc(&wr.get_ref()[format::HEADER_CRC_RANGE]);
-        format::HEADER_CRC.set(wr.get_mut(), header_crc);
+        let header_crc = Self::set_header_crc(wr.get_mut());
 
-        let body_crc = crc(&wr.get_ref()[format::BODY_CRC_RANGE]);
+        let body_crc = crc(&wr.get_ref()[format::BODY_CRC_START..]);
         format::BODY_CRC.set(wr.get_mut(), body_crc);
 
         (header_crc, body_crc)
+    }
+
+    fn set_header_crc(buf: &mut [u8]) -> u32 {
+        let header_crc = crc(&buf[format::HEADER_CRC_RANGE]);
+        format::HEADER_CRC.set(buf, header_crc);
+        header_crc
+    }
+}
+
+impl From<Vec<MessageBuilder>> for BufEntryBuilder {
+    fn from(mut v: Vec<MessageBuilder>) -> Self {
+        let mut b = BufEntryBuilder::dense();
+        b.messages(&mut v);
+        b
+    }
+}
+
+impl From<MessageBuilder> for BufEntryBuilder {
+    fn from(v: MessageBuilder) -> Self {
+        let mut b = BufEntryBuilder::dense();
+        b.message(v);
+        b
+    }
+}
+
+fn crc(buf: &[u8]) -> u32 {
+    crc::crc32::checksum_castagnoli(buf)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use super::Error;
+    use assert_matches::assert_matches;
+
+    mod buf_entry {
+        use super::*;
+
+        mod validate_body {
+            use super::*;
+
+            fn val_err_opts(e: &BufEntry, buf: &impl Buf,
+                    dense: bool, single_timestamp: bool) -> ErrorKind {
+                e.validate_body(buf, ValidBody {
+                    dense: dense,
+                    single_timestamp: single_timestamp
+                })
+                    .err().unwrap().kind().clone()
+            }
+
+            fn val_err(e: &BufEntry, buf: &impl Buf) -> ErrorKind {
+                val_err_opts(e, buf, false, false)
+            }
+
+            #[test]
+            fn bad_body_crc_field() {
+                // Check corruption in the body_crc field itself.
+                let (_, mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
+                buf[format::BODY_CRC.pos] = !buf[format::BODY_CRC.pos];
+                let e = BufEntry::decode(&buf).unwrap().unwrap();
+
+                assert_matches!(val_err(&e, &buf),
+                        ErrorKind::Entry(Error::BadBody(BadBody::BadCrc)));
+            }
+
+            #[test]
+            fn bad_body_crc_content() {
+                // Check corruption is first and last bytes of the CRC'ed body range.
+                for &i in &[format::BODY_CRC_START as isize, -1] {
+                    let (e, mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
+
+                    let i = if i < 0 { buf.len() as isize + i } else { i } as usize;
+                    buf[i] = !buf[i];
+
+                    assert_matches!(val_err(&e, &buf),
+                        ErrorKind::Entry(Error::BadBody(BadBody::BadCrc)));
+                }
+            }
+
+            #[test]
+            fn last_timestamp_mismatch() {
+                let (_, mut buf) = BufEntryBuilder::from(
+                    MessageBuilder {
+                        timestamp: Some(Timestamp::epoch().checked_add_millis(1).unwrap()),
+                        ..Default::default()
+                    }
+                ).build();
+
+                format::LAST_TIMESTAMP.set(&mut buf, Timestamp::epoch().checked_add_millis(2).unwrap());
+                BufEntryBuilder::set_header_crc(&mut buf);
+                let e = BufEntry::decode(&buf).unwrap().unwrap();
+                assert_matches!(val_err(&e, &buf),
+                        ErrorKind::Entry(Error::BadMessages(BadMessages::LastTimestampMismatch)));
+            }
+
+            #[test]
+            fn not_single_timestamp() {
+                let (e, buf) = BufEntryBuilder::from(vec![
+                    MessageBuilder {
+                        timestamp: Some(Timestamp::epoch()),
+                        ..Default::default()
+                    },
+                    MessageBuilder {
+                        timestamp: Some(Timestamp::epoch().checked_add_millis(100).unwrap()),
+                        ..Default::default()
+                    },
+                ]).build();
+
+                assert_matches!(val_err_opts(&e, &buf, false, true),
+                        ErrorKind::Entry(Error::BadMessages(BadMessages::SingleTimestampRequired)));
+            }
+
+            #[test]
+            fn not_dense_inner() {
+                // No gaps between message ids.
+                let (e, buf) = BufEntryBuilder::from(vec![
+                    MessageBuilder::default(),
+                    MessageBuilder {
+                        id: Id::new(100),
+                        ..Default::default()
+                    },
+                ]).build();
+                assert_matches!(val_err_opts(&e, &buf, true, false),
+                    ErrorKind::Entry(Error::BadMessages(BadMessages::DenseRequired)));
+            }
+
+            #[test]
+            fn not_dense_outer() {
+                // No gaps after start_id and before end_id.
+                let mut b = BufEntryBuilder::sparse(Id::new(50).unwrap(), Id::new(100).unwrap());
+                b.message(MessageBuilder { id: Id::new(75), .. Default::default() });
+                let (e, buf) = b.build();
+                assert_matches!(val_err_opts(&e, &buf, true, false),
+                    ErrorKind::Entry(Error::BadMessages(BadMessages::DenseRequired)));
+            }
+        }
     }
 }
