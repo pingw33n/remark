@@ -207,9 +207,9 @@ impl BufEntry {
     }
 
     pub fn set_timestamp(&mut self, buf: &mut BytesMut, timestamp: Timestamp) {
-        let delta = self.last_timestamp.duration_since(self.first_timestamp).unwrap();
+        let delta = self.last_timestamp - self.first_timestamp;
         self.first_timestamp = timestamp;
-        self.last_timestamp = timestamp.checked_add(delta).unwrap();
+        self.last_timestamp = timestamp + delta;
 
         format::FIRST_TIMESTAMP.set(&mut *buf, self.first_timestamp);
         format::LAST_TIMESTAMP.set(&mut *buf, self.last_timestamp);

@@ -77,6 +77,20 @@ impl fmt::Display for Id {
     }
 }
 
+impl ops::Add<u64> for Id {
+    type Output = Self;
+
+    fn add(self, rhs: u64) -> Self::Output {
+        self.checked_add(rhs).unwrap()
+    }
+}
+
+impl ops::AddAssign<u64> for Id {
+    fn add_assign(&mut self, rhs: u64) {
+        *self = *self + rhs;
+    }
+}
+
 impl ops::Sub for Id {
     type Output = u64;
 
@@ -93,6 +107,12 @@ impl ops::Sub<u64> for Id {
     }
 }
 
+impl ops::SubAssign<u64> for Id {
+    fn sub_assign(&mut self, rhs: u64) {
+        *self = *self - rhs;
+    }
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Timestamp(i64);
 
@@ -100,7 +120,7 @@ impl Timestamp {
     pub fn now() -> Self {
         let dur = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
             .expect("system time couldn't be converted to Timestamp");
-        Self::from_duration(dur).unwrap()
+        Self::from_duration_since_epoch(dur).unwrap()
     }
 
     pub fn epoch() -> Self {
@@ -115,26 +135,92 @@ impl Timestamp {
         Self(i64::max_value())
     }
 
-    pub fn from_duration(v: Duration) -> Option<Self> {
-        Some(Self(v.as_millis_u64().and_then(|v| cast::i64(v).ok())?))
-    }
-
     pub fn millis(&self) -> i64 {
         self.0
     }
 
     pub fn checked_add(&self, duration: Duration) -> Option<Self> {
-        self.checked_add_millis(Self::from_duration(duration)?.0)
+        self.checked_add_millis(Self::from_duration_since_epoch(duration)?.0)
     }
 
     pub fn checked_add_millis(&self, millis: i64) -> Option<Self> {
         self.0.checked_add(millis).map(|v| v.into())
     }
 
-    pub fn duration_since(&self, since: Timestamp) -> Option<Duration> {
-        self.0.checked_sub(since.0)
-            .and_then(|v| cast::u64(v).ok())
-            .map(Duration::from_millis)
+    pub fn checked_sub(&self, duration: Duration) -> Option<Self> {
+        self.checked_sub_millis(Self::from_duration_since_epoch(duration)?.0)
+    }
+
+    pub fn checked_sub_millis(&self, millis: i64) -> Option<Self> {
+        self.0.checked_sub(millis).map(|v| v.into())
+    }
+
+    fn from_duration_since_epoch(v: Duration) -> Option<Self> {
+        Some(Self(v.as_millis_u64().and_then(|v| cast::i64(v).ok())?))
+    }
+}
+
+impl ops::Add<i64> for Timestamp {
+    type Output = Self;
+
+    fn add(self, rhs: i64) -> Self::Output {
+        self.checked_add_millis(rhs).unwrap()
+    }
+}
+
+impl ops::AddAssign<i64> for Timestamp {
+    fn add_assign(&mut self, rhs: i64) {
+        *self = *self + rhs;
+    }
+}
+
+impl ops::Add<Duration> for Timestamp {
+    type Output = Self;
+
+    fn add(self, rhs: Duration) -> Self::Output {
+        self.checked_add(rhs).unwrap()
+    }
+}
+
+impl ops::AddAssign<Duration> for Timestamp {
+    fn add_assign(&mut self, rhs: Duration) {
+        *self = *self + rhs;
+    }
+}
+
+impl ops::Sub for Timestamp {
+    type Output = i64;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        self.millis().checked_sub(rhs.millis()).unwrap()
+    }
+}
+
+impl ops::Sub<i64> for Timestamp {
+    type Output = Self;
+
+    fn sub(self, rhs: i64) -> Self::Output {
+        self.checked_sub_millis(rhs).unwrap()
+    }
+}
+
+impl ops::SubAssign<i64> for Timestamp {
+    fn sub_assign(&mut self, rhs: i64) {
+        *self = *self - rhs;
+    }
+}
+
+impl ops::Sub<Duration> for Timestamp {
+    type Output = Self;
+
+    fn sub(self, rhs: Duration) -> Self::Output {
+        self.checked_sub(rhs).unwrap()
+    }
+}
+
+impl ops::SubAssign<Duration> for Timestamp {
+    fn sub_assign(&mut self, rhs: Duration) {
+        *self = *self - rhs;
     }
 }
 
