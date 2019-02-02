@@ -26,7 +26,7 @@ const MIN_INDEX_EACH_BYTES: u32 = 1024;
 const MAX_INDEX_EACH_BYTES: u32 = HARD_MAX_SEGMENT_LEN;
 
 pub type IdIndex = Index<u32, u32>;
-pub type TimestampIndex = Index<Timestamp, u32, index::DupIgnored>;
+pub type TimestampIndex = Index<Timestamp, u32, index::DupAllowed>;
 
 #[derive(Clone, Debug, Eq, Fail, PartialEq)]
 pub enum Error {

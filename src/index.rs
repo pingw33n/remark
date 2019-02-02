@@ -168,23 +168,23 @@ mod sealed { pub trait Sealed {} }
 
 pub trait DupPolicy: sealed::Sealed {
     #[doc(hidden)]
-    const __DUP_IGNORED: bool;
+    const __DUP_ALLOWED: bool;
 }
 
-pub struct DupIgnored(());
+pub struct DupAllowed(());
 
-impl DupPolicy for DupIgnored {
+impl DupPolicy for DupAllowed {
     #[doc(hidden)]
-    const __DUP_IGNORED: bool = true;
+    const __DUP_ALLOWED: bool = true;
 }
 
-impl sealed::Sealed for DupIgnored {}
+impl sealed::Sealed for DupAllowed {}
 
 pub struct DupNotAllowed(());
 
 impl DupPolicy for DupNotAllowed {
     #[doc(hidden)]
-    const __DUP_IGNORED: bool = false;
+    const __DUP_ALLOWED: bool = false;
 }
 
 impl sealed::Sealed for DupNotAllowed {}
@@ -330,8 +330,8 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
         let mut inner = self.inner.lock();
         inner.ensure_capacity(&self.file)?;
         if let Some((last_key, last_value)) = inner.last_entry(&self.mmap) {
-            Self::check_dup::<_, KP>(key, last_key)?;
-            Self::check_dup::<_, DupNotAllowed>(value, last_value)?;
+            Self::check_field::<_, KP>(key, last_key)?;
+            Self::check_field::<_, DupNotAllowed>(value, last_value)?;
         }
 
         let buf = unsafe { inner.free_buf(&self.mmap) }.unwrap();
@@ -417,10 +417,10 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
         value.encode(&mut entry[K::LEN..]);
     }
 
-    fn check_dup<T: Field, P: DupPolicy>(new: T, last: T) -> Result<()> {
+    fn check_field<T: Field, P: DupPolicy>(new: T, last: T) -> Result<()> {
         match new.cmp(&last) {
             Ordering::Less => Err(Error::PushMisordered.into()),
-            Ordering::Equal => if KP::__DUP_IGNORED && new == last {
+            Ordering::Equal => if KP::__DUP_ALLOWED {
                 Ok(())
             } else {
                 Err(Error::PushMisordered.into())
@@ -587,9 +587,9 @@ mod test {
     }
 
     #[test]
-    fn push_misorder_key_dup_ignored() {
+    fn push_misorder_key_dup_allowed() {
         let f = mktemp::Temp::new_file().unwrap();
-        let idx: Index<u64, u32, DupIgnored> = Index::open_or_create(&f, Mode::Growable {
+        let idx: Index<u64, u32, DupAllowed> = Index::open_or_create(&f, Mode::Growable {
             preallocate: 5,
             max_capacity: 5,
         }).unwrap();
@@ -600,5 +600,6 @@ mod test {
         assert_matches!(err_kind(idx.push(101, 200)), ErrorKind::Index(Error::PushMisordered));
         assert_matches!(err_kind(idx.push(101, 199)), ErrorKind::Index(Error::PushMisordered));
         assert_matches!(err_kind(idx.push(100, 203)), ErrorKind::Index(Error::PushMisordered));
+        assert_eq!(idx.len(), 4);
     }
 }
