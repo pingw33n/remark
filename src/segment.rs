@@ -1,4 +1,5 @@
 use if_chain::if_chain;
+use log::warn;
 use matches::matches;
 use std::borrow::Cow;
 use std::cmp;
@@ -216,12 +217,22 @@ impl Segment {
 
         let next_id = {
             let id = Self::local_to_global_id0(base_id, id_index.last_key().unwrap_or(0));
-            let it = Self::get0(&file, base_id, Id::max_value(), &id_index, id..);
+            let mut it = Self::get0(&file, base_id, Id::max_value(), &id_index, id..);
             let mut last_id = None;
-            for entry in it {
+            for entry in &mut it {
                 let entry = entry?;
                 last_id = Some(entry.end_id());
             }
+
+            let file_len = file.file.len();
+            if file_len > it.file_position() {
+                warn!("detected trailing garbage in segment {:?} length {}, truncating to {}",
+                    file.path, file_len, it.file_position());
+                file.file.truncate(it.file_position()).context(Error::Io)
+                    .map_err(crate::error::Error::from)
+                    .with_more_context(|_| format!("while truncating file {:?}", file.path))?;
+            }
+
             last_id.map(|v| v + 1).unwrap_or(base_id)
         };
 
@@ -440,6 +451,10 @@ impl Iter {
         &mut self.buf
     }
 
+    pub fn file_position(&self) -> u64 {
+        self.rd.position() + self.frame_len.map(|v| cast::u64(v)).unwrap_or(0)
+    }
+
     pub fn complete_read(&mut self) -> Result<()> {
         if let Some(frame_len) = self.frame_len {
             self.buf.set_len(frame_len);
@@ -651,5 +666,25 @@ mod test {
         fs::OpenOptions::new().write(true).create(true).truncate(true).open(idx_path).unwrap();
         assert_matches!(Segment::open(path, Default::default()).err().unwrap().kind(),
             ErrorKind::Segment(Error::TimestampIndexEmpty));
+    }
+
+    #[test]
+    fn truncate_trailing_garbage() {
+        let dir = mktemp::Temp::new_dir().unwrap();
+        let (path, expected_len) = {
+            let mut seg = Segment::create_new(&dir, Id::min_value(), Timestamp::min_value(),
+                Default::default()).unwrap();
+            let (mut entry, mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
+            seg.push(&mut entry, &mut buf).unwrap();
+            (seg.path().clone(), seg.len())
+        };
+
+        fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&[42]).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), expected_len as u64 + 1);
+
+        let mut seg = Segment::open(&path, Default::default()).unwrap();
+        seg.force_fsync().unwrap();
+        assert_eq!(seg.len(), expected_len);
+        assert_eq!(fs::metadata(&path).unwrap().len(), expected_len as u64);
     }
 }
