@@ -109,6 +109,16 @@ impl File {
         self.file.set_permissions(perm)
     }
 
+    pub fn truncate(&self, new_len: u64) -> Result<()> {
+        let old_len = self.len();
+        assert!(new_len <= old_len);
+        self.file.set_len(new_len)?;
+        if self.len.compare_and_swap(old_len, new_len, Ordering::SeqCst) != old_len {
+            panic!("concurrent truncation and write detected");
+        }
+        Ok(())
+    }
+
     fn new(path: impl AsRef<Path>, options: &OpenOptions) -> Result<Self> {
         let path = path.as_ref();
         let file = fs::OpenOptions::new()
