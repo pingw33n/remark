@@ -1,6 +1,7 @@
 pub(in crate) mod format;
 
 use byteorder::{BigEndian, ReadBytesExt};
+use if_chain::if_chain;
 use std::borrow::Cow;
 use std::io::SeekFrom;
 use std::io::prelude::*;
@@ -26,6 +27,9 @@ pub enum Error {
 
     #[fail(display = "{}", _0)]
     BadVersion(Cow<'static, str>),
+
+    #[fail(display = "{}", _0)]
+    BadUpdate(Cow<'static, str>),
 
     #[fail(display = "IO error")]
     Io,
@@ -54,21 +58,28 @@ pub enum BadMessages {
     #[fail(display = "all message timestamps must be equal to the first_timestamp")]
     SingleTimestampRequired,
 
-    #[fail(display = "last message timestamp differs from the one in the entry header")]
+    #[fail(display = "first message timestamp differs from the one in the entry header")]
     FirstTimestampMismatch,
 
-    #[fail(display = "last message timestamp differs from the one in the entry header")]
-    LastTimestampMismatch,
+    #[fail(display = "max message timestamp differs from the one in the entry header")]
+    MaxTimestampMismatch,
 
     #[fail(display = "message ID overflow")]
     IdOverflow,
 }
 
+#[derive(Clone, Debug, Default)]
 pub struct ValidBody {
     pub dense: bool,
 
     /// Effectively this requires all `timestamp_delta`s are zero.
     pub single_timestamp: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Update {
+    pub start_id: Option<Id>,
+    pub first_timestamp: Option<Timestamp>,
 }
 
 #[derive(Debug)]
@@ -78,7 +89,7 @@ pub struct BufEntry {
     start_id: Id,
     end_id_delta: u32,
     first_timestamp: Timestamp,
-    last_timestamp: Timestamp,
+    max_timestamp: Timestamp,
     flags: u16,
     term: u64,
     body_crc: u32,
@@ -101,15 +112,15 @@ impl BufEntry {
             return Ok(false);
         }
 
-        let len = if prolog_only {
+        let read_len = if prolog_only {
             format::FRAME_PROLOG_LEN
         } else {
             len
         };
 
-        buf.set_len(len);
+        buf.set_len(read_len);
         format::FRAME_LEN.set(&mut buf[..], len as u32);
-        rd.read_exact(&mut buf[format::FRAME_LEN.next..len])
+        rd.read_exact(&mut buf[format::FRAME_LEN.next..read_len])
             .context(Error::Io)?;
 
         Ok(true)
@@ -163,9 +174,9 @@ impl BufEntry {
             Error::BadHeader("end_id overflows u64".into()).into_error())?;
 
         let first_timestamp = FIRST_TIMESTAMP.get(buf);
-        let last_timestamp = LAST_TIMESTAMP.get(buf);
-        if last_timestamp < first_timestamp {
-            return Err(Error::BadHeader("last_timestamp is less than first_timestamp"
+        let max_timestamp = MAX_TIMESTAMP.get(buf);
+        if max_timestamp < first_timestamp {
+            return Err(Error::BadHeader("max_timestamp is less than first_timestamp"
                 .into()).into());
         }
 
@@ -174,6 +185,7 @@ impl BufEntry {
         let body_crc = BODY_CRC.get(buf);
 
         let message_count = MESSAGE_COUNT.get(buf);
+
         let id_count = cast::u64(end_id_delta) + 1;
         if cast::u64(message_count) > id_count  {
             return Err(Error::BadHeader(format!(
@@ -183,13 +195,19 @@ impl BufEntry {
                 .into()).into());
         }
 
+        if message_count <= 1 && (first_timestamp != max_timestamp) {
+            return Err(Error::BadHeader(
+                "first_timestamp must be the same as max_timestamp when message_count <= 1"
+                    .into()).into());
+        }
+
         Ok(Some(Self {
             frame_len,
             header_crc,
             start_id,
             end_id_delta,
             first_timestamp,
-            last_timestamp,
+            max_timestamp,
             flags,
             term,
             body_crc,
@@ -232,6 +250,10 @@ impl BufEntry {
         self.frame_len
     }
 
+    pub fn header_crc(&self) -> u32 {
+        self.header_crc
+    }
+
     pub fn start_id(&self) -> Id {
         self.start_id
     }
@@ -240,26 +262,69 @@ impl BufEntry {
         self.start_id.checked_add(cast::u64(self.end_id_delta)).unwrap()
     }
 
-    pub fn set_start_id(&mut self, buf: &mut BytesMut, start_id: Id) {
-        self.start_id = start_id;
-        format::START_ID.set(&mut *buf, Some(start_id))
-    }
-
     pub fn first_timestamp(&self) -> Timestamp {
         self.first_timestamp
     }
 
-    pub fn last_timestamp(&self) -> Timestamp {
-        self.last_timestamp
+    pub fn max_timestamp(&self) -> Timestamp {
+        self.max_timestamp
     }
 
-    pub fn set_timestamp(&mut self, buf: &mut BytesMut, timestamp: Timestamp) {
-        let delta = self.last_timestamp - self.first_timestamp;
-        self.first_timestamp = timestamp;
-        self.last_timestamp = timestamp + delta;
+    pub fn flags(&self) -> u16 {
+        self.flags
+    }
 
-        format::FIRST_TIMESTAMP.set(&mut *buf, self.first_timestamp);
-        format::LAST_TIMESTAMP.set(&mut *buf, self.last_timestamp);
+    pub fn term(&self) -> u64 {
+        self.term
+    }
+
+    pub fn body_crc(&self) -> u32 {
+        self.body_crc
+    }
+
+    pub fn message_count(&self) -> u32 {
+        self.message_count
+    }
+
+    pub fn update(&mut self, buf: &mut BytesMut, update: Update) -> Result<()> {
+        let mut dirty = false;
+        let buf = buf.as_mut_slice();
+        if_chain! {
+            if let Some(start_id) = update.start_id;
+            if start_id != self.start_id;
+            then {
+                if start_id.checked_add(cast::u64(self.end_id_delta)).is_none() {
+                    return Err(Error::BadUpdate("id overflow".into()).into());
+                }
+                self.start_id = start_id;
+                format::START_ID.set(buf, Some(start_id));
+                dirty = true;
+            }
+        }
+        if_chain! {
+            if let Some(first_timestamp) = update.first_timestamp;
+            if first_timestamp != self.first_timestamp;
+            then {
+                let delta = first_timestamp.checked_delta(self.first_timestamp)
+                    .ok_or_else(|| Error::BadUpdate("first_timestamp overflow"
+                    .into()).into_error())?;
+                let max_timestamp = self.max_timestamp.checked_add_millis(delta)
+                    .ok_or_else(|| Error::BadUpdate("max_timestamp overflow"
+                    .into()).into_error())?;
+
+                self.first_timestamp = first_timestamp;
+                format::FIRST_TIMESTAMP.set(buf, first_timestamp);
+
+                self.max_timestamp = max_timestamp;
+                format::MAX_TIMESTAMP.set(buf, max_timestamp);
+
+                dirty = true;
+            }
+        }
+        if dirty {
+            BufEntryBuilder::set_header_crc(buf);
+        }
+        Ok(())
     }
 
     pub fn validate_body(&self, buf: &impl Buf, options: ValidBody) -> Result<()> {
@@ -279,6 +344,7 @@ impl BufEntry {
         rd.set_position(format::MESSAGES_START);
         let mut next_id = self.start_id;
         let mut next_timestamp = self.first_timestamp;
+        let mut max_timestamp = None;
         for i in 0..self.message_count {
             // TODO implement more efficient reading of message specifically for validation.
             let msg = Message::read(&mut rd, next_id, next_timestamp)
@@ -292,11 +358,14 @@ impl BufEntry {
             if options.single_timestamp && msg.timestamp != self.first_timestamp {
                 return Err(BadMessages::SingleTimestampRequired.into());
             }
+            if max_timestamp.is_none() || msg.timestamp > max_timestamp.unwrap() {
+                max_timestamp = Some(msg.timestamp);
+            }
             next_id += 1;
             next_timestamp = msg.timestamp;
         }
-        if next_timestamp != self.last_timestamp {
-            return Err(BadMessages::LastTimestampMismatch.into());
+        if max_timestamp.is_some() && max_timestamp.unwrap() != self.max_timestamp {
+            return Err(BadMessages::MaxTimestampMismatch.into());
         }
         if rd.available() > 0 {
             return Err(BadBody::TrailingGarbage.into())
@@ -328,6 +397,7 @@ impl<R: Read> Iterator for BufEntryIter<R> {
                         None => return Some(Err(BadMessages::IdOverflow.into())),
                     }
                 }
+                self.next_timestamp = msg.timestamp;
                 Ok(msg)
             }
             Err(e) => Err(e),
@@ -341,7 +411,8 @@ pub struct BufEntryBuilder {
     end_id: Option<Id>,
     next_id: Id,
     first_timestamp: Timestamp,
-    last_timestamp: Timestamp,
+    max_timestamp: Timestamp,
+    next_timestamp: Timestamp,
     flags: u16,
     term: u64,
     message_count: u32,
@@ -366,7 +437,8 @@ impl BufEntryBuilder {
             end_id,
             next_id,
             first_timestamp: Timestamp::epoch(),
-            last_timestamp: Timestamp::epoch(),
+            max_timestamp: Timestamp::epoch(),
+            next_timestamp: Timestamp::epoch(),
             flags: 0,
             term: 0,
             message_count: 0,
@@ -389,7 +461,7 @@ impl BufEntryBuilder {
 
     pub fn get_timestamp_range(&self) -> Option<(Timestamp, Timestamp)> {
         if self.message_count > 0 {
-            Some((self.first_timestamp, self.last_timestamp))
+            Some((self.first_timestamp, self.max_timestamp))
         } else {
             None
         }
@@ -425,26 +497,30 @@ impl BufEntryBuilder {
         self.next_id = self.next_id.checked_add(1).unwrap();
 
         if msg.timestamp.is_none() {
-            msg.timestamp = Some(self.last_timestamp);
+            msg.timestamp = Some(self.next_timestamp);
         } else {
-            assert!(msg.timestamp.unwrap() >= self.last_timestamp);
+            assert!(msg.timestamp.unwrap().checked_delta(self.next_timestamp).is_some());
         }
 
         let msg = msg.build();
 
-        let next_timestamp = if self.message_count == 0 {
+        if self.message_count == 0 {
             if self.start_id.is_none() {
                 self.start_id = Some(msg.id);
             }
             self.first_timestamp = msg.timestamp;
-            self.first_timestamp
-        } else {
-            self.last_timestamp
-        };
-        self.last_timestamp = msg.timestamp;
+            self.next_timestamp = msg.timestamp;
+        }
+
+        let expected_next_timestamp = self.next_timestamp;
+        self.next_timestamp = msg.timestamp;
+        if msg.timestamp > self.max_timestamp {
+            self.max_timestamp = msg.timestamp;
+        }
+
         self.message_count = self.message_count.checked_add(1).unwrap();
 
-        let msg_wr = msg.writer(expected_next_id, next_timestamp);
+        let msg_wr = msg.writer(expected_next_id, expected_next_timestamp);
 
         if self.buf.capacity() == 0 {
             let len = format::FRAME_PROLOG_LEN + msg_wr.encoded_len();
@@ -483,7 +559,7 @@ impl BufEntryBuilder {
             start_id: id_range.0,
             end_id_delta: Self::id_delta(id_range),
             first_timestamp: self.first_timestamp,
-            last_timestamp: self.last_timestamp,
+            max_timestamp: self.max_timestamp,
             flags: self.flags,
             term: self.term,
             body_crc,
@@ -513,7 +589,7 @@ impl BufEntryBuilder {
         START_ID.write(wr, Some(id_range.0)).unwrap();
         END_ID_DELTA.write(wr, Self::id_delta(id_range)).unwrap();
         FIRST_TIMESTAMP.write(wr, self.first_timestamp).unwrap();
-        LAST_TIMESTAMP.write(wr, self.last_timestamp).unwrap();
+        MAX_TIMESTAMP.write(wr, self.max_timestamp).unwrap();
         FLAGS.write(wr, self.flags).unwrap();
         TERM.write(wr, self.term).unwrap();
 
@@ -523,17 +599,21 @@ impl BufEntryBuilder {
         MESSAGE_COUNT.write(wr, self.message_count).unwrap();
 
         let header_crc = Self::set_header_crc(wr.get_mut());
-
-        let body_crc = crc(&wr.get_ref()[format::BODY_CRC_START..]);
-        format::BODY_CRC.set(wr.get_mut(), body_crc);
+        let body_crc = Self::set_body_crc(wr.get_mut());
 
         (header_crc, body_crc)
     }
 
     fn set_header_crc(buf: &mut [u8]) -> u32 {
-        let header_crc = crc(&buf[format::HEADER_CRC_RANGE]);
-        format::HEADER_CRC.set(buf, header_crc);
-        header_crc
+        let r = crc(&buf[format::HEADER_CRC_RANGE]);
+        format::HEADER_CRC.set(buf, r);
+        r
+    }
+
+    fn set_body_crc(buf: &mut [u8]) -> u32 {
+        let r = crc(&buf[format::BODY_CRC_START..]);
+        format::BODY_CRC.set(buf, r);
+        r
     }
 }
 
@@ -563,6 +643,38 @@ mod test {
     use super::Error;
     use assert_matches::assert_matches;
 
+    mod buf_entry_build {
+        use super::*;
+
+        #[test]
+        fn non_monotonic_timestamps() {
+            let ts = &[
+                Timestamp::epoch(),
+                Timestamp::epoch() + 1000,
+                Timestamp::epoch() - 1000,
+            ];
+            let mut b = BufEntryBuilder::dense();
+            b.message(MessageBuilder {
+                timestamp: Some(ts[0]),
+                .. Default::default()
+            });
+            b.message(MessageBuilder {
+                timestamp: Some(ts[1]),
+                .. Default::default()
+            });
+            b.message(MessageBuilder {
+                timestamp: Some(ts[2]),
+                .. Default::default()
+            });
+            let (e, buf) = b.build();
+            assert_eq!(e.first_timestamp(), ts[0]);
+            assert_eq!(e.max_timestamp(), ts[1]);
+
+            let act_ts: Vec<_> = e.iter(&buf).map(|v| v.unwrap().timestamp).collect();
+            assert_eq!(&act_ts, ts);
+        }
+    }
+
     mod buf_entry {
         use super::*;
 
@@ -572,10 +684,9 @@ mod test {
             fn val_err_opts(e: &BufEntry, buf: &impl Buf,
                     dense: bool, single_timestamp: bool) -> ErrorKind {
                 e.validate_body(buf, ValidBody {
-                    dense: dense,
-                    single_timestamp: single_timestamp
-                })
-                    .err().unwrap().kind().clone()
+                    dense,
+                    single_timestamp,
+                }).err().unwrap().kind().clone()
             }
 
             fn val_err(e: &BufEntry, buf: &impl Buf) -> ErrorKind {
@@ -608,19 +719,53 @@ mod test {
             }
 
             #[test]
-            fn last_timestamp_mismatch() {
-                let (_, mut buf) = BufEntryBuilder::from(
+            fn first_timestamp_mismatch() {
+                let b = BufEntryBuilder::sparse(Id::new(10).unwrap(), Id::new(20).unwrap());
+                let (_, buf) = b.build();
+
+                // Have to craft an entry with bad first_timestamp since BufEntryBuilder
+                // always sets valid value for the field.
+                let msg = MessageBuilder {
+                    id: Id::new(10),
+                    timestamp: Some(Timestamp::epoch().checked_add_millis(1).unwrap()),
+                    ..Default::default()
+                }.build();
+                let mut c = Cursor::new(buf);
+                c.set_position(format::MESSAGES_START);
+                msg.writer(Id::new(10).unwrap(), Timestamp::epoch()).write(&mut c).unwrap();
+                let ref mut buf = c.into_inner();
+
+                let frame_len = buf.len() as u32;
+                format::FRAME_LEN.set(buf, frame_len);
+                BufEntryBuilder::set_header_crc(buf);
+                format::MESSAGE_COUNT.set(buf, 1);
+                BufEntryBuilder::set_body_crc(buf);
+
+                let e = BufEntry::decode(&buf).unwrap().unwrap();
+                assert_matches!(val_err(&e, &buf),
+                        ErrorKind::Entry(Error::BadMessages(BadMessages::FirstTimestampMismatch)));
+            }
+
+            #[test]
+            fn max_timestamp_mismatch() {
+                let (_, mut buf) = BufEntryBuilder::from(vec![
                     MessageBuilder {
                         timestamp: Some(Timestamp::epoch().checked_add_millis(1).unwrap()),
                         ..Default::default()
-                    }
-                ).build();
+                    },
+                    MessageBuilder {
+                        timestamp: Some(Timestamp::epoch().checked_add_millis(2).unwrap()),
+                        ..Default::default()
+                    },
+                ]).build();
 
-                format::LAST_TIMESTAMP.set(&mut buf, Timestamp::epoch().checked_add_millis(2).unwrap());
+                let mismatching_timestamp = Timestamp::epoch().checked_add_millis(3).unwrap();
+                format::MAX_TIMESTAMP.set(&mut buf, mismatching_timestamp);
                 BufEntryBuilder::set_header_crc(&mut buf);
+
                 let e = BufEntry::decode(&buf).unwrap().unwrap();
                 assert_matches!(val_err(&e, &buf),
-                        ErrorKind::Entry(Error::BadMessages(BadMessages::LastTimestampMismatch)));
+                        ErrorKind::Entry(Error::BadMessages(BadMessages::MaxTimestampMismatch)));
             }
 
             #[test]

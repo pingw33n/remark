@@ -38,7 +38,7 @@ fields! {
     START_ID: OptionId;
     END_ID_DELTA: u32;
     FIRST_TIMESTAMP: Timestamp;
-    LAST_TIMESTAMP: Timestamp;
+    MAX_TIMESTAMP: Timestamp;
     FLAGS: u16;
     TERM: u64;
     BODY_CRC: u32;

@@ -123,7 +123,7 @@ impl Timestamp {
         Self::from_duration_since_epoch(dur).unwrap()
     }
 
-    pub fn epoch() -> Self {
+    pub const fn epoch() -> Self {
         Self(0)
     }
 
@@ -153,6 +153,10 @@ impl Timestamp {
 
     pub fn checked_sub_millis(&self, millis: i64) -> Option<Self> {
         self.0.checked_sub(millis).map(|v| v.into())
+    }
+
+    pub fn checked_delta(&self, other: Self) -> Option<i64> {
+        self.millis().checked_sub(other.millis())
     }
 
     fn from_duration_since_epoch(v: Duration) -> Option<Self> {
@@ -192,7 +196,7 @@ impl ops::Sub for Timestamp {
     type Output = i64;
 
     fn sub(self, rhs: Self) -> Self::Output {
-        self.millis().checked_sub(rhs.millis()).unwrap()
+        self.checked_delta(rhs).unwrap()
     }
 }
 
@@ -294,7 +298,7 @@ impl Message {
         assert!(self.id.checked_delta(next_id)
             .filter(|&v| v <= u32::max_value() as u64)
             .is_some());
-        assert!(self.timestamp >= next_timestamp, "{:?} {:?}", self.timestamp, next_timestamp);
+        assert!(self.timestamp.checked_delta(next_timestamp).is_some());
         MessageWriter {
             msg: self,
             next_id,

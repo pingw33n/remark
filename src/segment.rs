@@ -1,4 +1,5 @@
 use if_chain::if_chain;
+use matches::matches;
 use std::borrow::Cow;
 use std::cmp;
 use std::io::prelude::*;
@@ -7,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::bytes::*;
-use crate::entry::BufEntry;
+use crate::entry::{BufEntry, Update, ValidBody};
 use crate::entry::format;
 use crate::error::*;
 use crate::file::*;
@@ -84,11 +85,17 @@ impl Default for Options {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum Mode {
+    Open,
+    CreateAndOverwrite { max_timestamp: Timestamp },
+}
+
 pub struct Segment {
     file: Arc<SegFile>,
     base_id: Id,
     next_id: Id,
-    min_timestamp: Timestamp,
+    max_timestamp: Timestamp,
     id_index:  IdIndex,
     timestamp_index: TimestampIndex,
     index_each_bytes: u32,
@@ -133,15 +140,15 @@ impl Segment {
                 format!("couldn't parse base id from filename \"{}\"", file_name)
                     .into()).into_error())?;
 
-        Self::new(dir, base_id, false, options)
+        Self::new(dir, base_id, Mode::Open, options)
     }
 
-    pub fn create(path: impl AsRef<Path>, base_id: Id, options: Options) -> Result<Self> {
-        Self::new(path, base_id, true, options)
-    }
-
-    fn new(path: impl AsRef<Path>, base_id: Id, create_and_overwrite: bool,
+    pub fn create(path: impl AsRef<Path>, base_id: Id, max_timestamp: Timestamp,
             options: Options) -> Result<Self> {
+        Self::new(path, base_id, Mode::CreateAndOverwrite { max_timestamp }, options)
+    }
+
+    fn new(path: impl AsRef<Path>, base_id: Id, mode: Mode, options: Options) -> Result<Self> {
         assert!(options.index_each_bytes >= MIN_INDEX_EACH_BYTES);
         assert!(options.index_each_bytes <= MAX_INDEX_EACH_BYTES);
         assert!(options.index_preallocate >= 1);
@@ -150,6 +157,7 @@ impl Segment {
         let base_path = PathBuf::from(path.as_ref());
 
         let path = base_path.join(format!("{}{}", base_name, DATA_FILE_SUFFIX));
+        let create_and_overwrite = matches!(mode, Mode::CreateAndOverwrite { .. });
         let file = OpenOptions::new()
             .create(create_and_overwrite)
             .truncate(create_and_overwrite)
@@ -159,6 +167,10 @@ impl Segment {
             } else {
                 Error::Open(path.clone())
             })?;
+        let file = Arc::new(SegFile {
+            path,
+            file,
+        });
 
         // FIXME repair data file: truncate to the entry boundary (either using index or during
         // index rebuild if it's damaged)
@@ -185,29 +197,39 @@ impl Segment {
         let timestamp_index = Index::open_or_create(&timestamp_index_path, index_mode)
             .with_more_context(|_| format!("opening timestamp index file {:?}", timestamp_index_path))?;
 
-        let (next_id, min_timestamp) = if let Some(pos) = id_index.last_value() {
-            let ref mut rd = file.reader();
-            rd.set_position(pos as u64);
-            let ref mut buf = BytesMut::new();
-            let mut next_id = None;
-            let mut last_timestamp = None;
-            while let Some(e) = BufEntry::read_prolog(rd, buf)? {
-                next_id = Some(e.end_id().checked_add(1).unwrap());
-                last_timestamp = Some(e.last_timestamp());
+        let next_id = {
+            let id = Self::local_to_global_id0(base_id, id_index.last_key().unwrap_or(0));
+            let it = Self::get0(&file, base_id, Id::max_value(), &id_index, id..);
+            let mut last_id = None;
+            for entry in it {
+                let entry = entry?;
+                last_id = Some(entry.end_id());
             }
-            (next_id.unwrap(), last_timestamp.unwrap())
+            last_id.map(|v| v + 1).unwrap_or(base_id)
+        };
+
+        let max_timestamp = if let Mode::CreateAndOverwrite { max_timestamp } = mode {
+            timestamp_index.push(max_timestamp, 0)
+                .more_context("pushing checkpoint entry into timestamp index")?;
+            max_timestamp
         } else {
-            (base_id, Timestamp::epoch())
+            let mut max_timestamp = Timestamp::min_value();
+            let id = Self::local_to_global_id0(base_id, timestamp_index.last_value().unwrap_or(0));
+            let it = Self::get0(&file, base_id, Id::max_value(), &id_index, id..);
+            for entry in it {
+                let entry = entry?;
+                if entry.max_timestamp() > max_timestamp {
+                    max_timestamp = entry.max_timestamp();
+                }
+            }
+            max_timestamp
         };
 
         Ok(Self {
-            file: Arc::new(SegFile {
-                path,
-                file,
-            }),
+            file,
             base_id,
             next_id,
-            min_timestamp,
+            max_timestamp,
             id_index,
             timestamp_index,
             index_each_bytes: options.index_each_bytes,
@@ -215,6 +237,10 @@ impl Segment {
             fsync_each_bytes: options.fsync_each_bytes,
             bytes_sync_last_fsync: 0,
         })
+    }
+
+    pub fn path(&self) -> &PathBuf {
+        &self.file.path
     }
 
     pub fn len(&self) -> u32 {
@@ -229,29 +255,45 @@ impl Segment {
         self.next_id
     }
 
+    pub fn max_timestamp(&self) -> Timestamp {
+        self.max_timestamp
+    }
+
     pub fn push(&mut self, entry: &mut BufEntry, buf: &mut BytesMut) -> Result<()> {
         assert!(self.file.file.len() + buf.len() as u64 <= HARD_MAX_SEGMENT_LEN as u64);
 
-        entry.set_start_id(buf, self.next_id);
-        let timestamp = cmp::max(Timestamp::now(), self.min_timestamp);
-        entry.set_timestamp(buf, timestamp);
-        self.next_id = self.next_id.checked_add(1).unwrap();
-        self.min_timestamp = timestamp;
+        entry.validate_body(buf, ValidBody {
+            single_timestamp: true,
+            ..Default::default()
+        }).more_context("validating body")?;
+
+        entry.update(buf, Update {
+            start_id: Some(self.next_id),
+            first_timestamp: Some(Timestamp::now()),
+        }).more_context("updating entry")?;
+
+        self.next_id = entry.end_id() + 1;
 
         let pos = self.len();
 
         self.file.file.writer().write_all(&buf[..]).context(Error::Io)?;
 
+        if entry.max_timestamp() > self.max_timestamp {
+            self.max_timestamp = entry.max_timestamp();
+        }
+
         self.bytes_since_last_index_push = self.bytes_since_last_index_push
             .saturating_add(cast::u32(buf.len()).unwrap());
 
         if self.bytes_since_last_index_push >= self.index_each_bytes {
-            let id_delta = cast::u32(entry.start_id().checked_delta(self.base_id)
-                .unwrap()).unwrap();
-            self.id_index.push(id_delta, pos)
+            let local_start_id = self.global_to_local_id(entry.start_id());
+            self.id_index.push(local_start_id, pos)
                 .more_context("pushing to id index")?;
-            self.timestamp_index.push(entry.first_timestamp(), pos)
+
+            let local_end_id = self.global_to_local_id(entry.end_id());
+            self.timestamp_index.push(self.max_timestamp, local_end_id)
                 .more_context("pushing to timestamp index")?;
+
             self.bytes_since_last_index_push = 0;
         }
 
@@ -276,12 +318,17 @@ impl Segment {
     }
 
     pub fn get(&self, range: impl RangeBounds<Id>) -> Iter {
+        Self::get0(&self.file, self.base_id, self.next_id, &self.id_index, range)
+    }
+
+    fn get0(file: &Arc<SegFile>, base_id: Id, next_id: Id, id_index: &IdIndex,
+            range: impl RangeBounds<Id>) -> Iter {
         let start_id = match range.start_bound() {
             Bound::Excluded(_) => unreachable!(),
             Bound::Included(v) => *v,
             Bound::Unbounded => Id::min_value(),
         };
-        let end_id = match range.end_bound() {
+        let end_id_excl = match range.end_bound() {
             Bound::Excluded(v) => {
                 assert!(*v >= start_id);
                 *v
@@ -292,17 +339,31 @@ impl Segment {
             },
             Bound::Unbounded => Id::max_value(),
         };
-        let (start_pos, force_eof) = if end_id > start_id &&
-                start_id >= self.base_id && start_id < self.next_id {
-            let local_id = cast::u32(start_id - self.base_id).unwrap();
-            (self.id_index.value_by_key(local_id)
+
+        let (start_pos, force_eof) = if end_id_excl > start_id &&
+                start_id < next_id && end_id_excl > base_id {
+            let start_id = cmp::max(start_id, base_id);
+            let local_id = Self::global_to_local_id0(base_id, start_id);
+            (id_index.value_by_key(local_id)
                  .unwrap_or(0) as u64, false)
         } else {
             (0, true)
         };
-        let mut rd: Reader<Arc<SegFile>> = self.file.clone().into();
+        let mut rd: Reader<Arc<SegFile>> = file.clone().into();
         rd.set_position(start_pos);
-        Iter::new(rd, start_id, end_id, force_eof)
+        Iter::new(rd, start_id, end_id_excl, force_eof)
+    }
+
+    fn global_to_local_id(&self, global_id: Id) -> u32 {
+        Self::global_to_local_id0(self.base_id, global_id)
+    }
+
+    fn global_to_local_id0(base_id: Id, global_id: Id) -> u32 {
+        cast::u32(global_id.checked_delta(base_id).unwrap()).unwrap()
+    }
+
+    fn local_to_global_id0(base_id: Id, local_id: u32) -> Id {
+        base_id.checked_add(cast::u64(local_id)).unwrap()
     }
 }
 
@@ -354,6 +415,10 @@ impl Iter {
         self.eof
     }
 
+    pub fn buf(&mut self) -> &BytesMut {
+        &self.buf
+    }
+
     pub fn buf_mut(&mut self) -> &mut BytesMut {
         &mut self.buf
     }
@@ -361,7 +426,7 @@ impl Iter {
     pub fn complete_read(&mut self) -> Result<()> {
         if let Some(frame_len) = self.frame_len {
             self.buf.set_len(frame_len);
-            let r = self.rd.read_exact(&mut self.buf[format::FRAME_PROLOG_LEN..frame_len - format::FRAME_PROLOG_LEN])
+            let r = self.rd.read_exact(&mut self.buf[format::FRAME_PROLOG_LEN..frame_len])
                 .context(Error::Io);
             if r.is_ok() {
                 self.frame_len = None;
@@ -432,12 +497,108 @@ impl Iterator for Iter {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::entry::BufEntryBuilder;
+    use crate::entry::{BufEntryBuilder, ValidBody};
+    use crate::message::MessageBuilder;
+    
+    #[test]
+    fn push_and_get() {
+        let dir = mktemp::Temp::new_dir().unwrap();
+        let seg_path;
+        {
+            let mut seg = Segment::create(&dir, Id::new(100).unwrap(), Timestamp::min_value(),
+                Default::default()).unwrap();
+
+            seg_path = seg.path().clone();
+
+            assert_eq!(seg.timestamp_index.last_entry().unwrap(), (Timestamp::min_value(), 0));
+            assert!(seg.get(..).next().is_none());
+
+            // first entry
+
+            let (mut entry, mut buf) = BufEntryBuilder::from(vec![
+                MessageBuilder {
+                    value: Some("msg1".into()),
+                    ..Default::default()
+                },
+                MessageBuilder {
+                    value: Some("msg2".into()),
+                    ..Default::default()
+                },
+            ]).build();
+            entry.validate_body(&buf, ValidBody { single_timestamp: true, ..Default::default() }).unwrap();
+            seg.push(&mut entry, &mut buf).unwrap();
+
+            let mut it = seg.get(..);
+
+            let act_entry = it.next().unwrap().unwrap();
+            it.complete_read().unwrap();
+            act_entry.validate_body(it.buf(), ValidBody { dense: true, single_timestamp: false }).unwrap();
+
+            let timestamp = entry.first_timestamp();
+
+            assert_eq!(act_entry.start_id(), Id::new(100).unwrap());
+            assert_eq!(act_entry.end_id(), Id::new(101).unwrap());
+            assert_eq!(act_entry.first_timestamp(), timestamp);
+            assert_eq!(act_entry.max_timestamp(), timestamp);
+
+            let act_msgs: Vec<_> = act_entry.iter(it.buf())
+                .map(|m| m.unwrap())
+                .collect();
+            assert_eq!(act_msgs, vec![
+                MessageBuilder {
+                    id: Id::new(100),
+                    timestamp: Some(timestamp),
+                    value: Some("msg1".into()),
+                    ..Default::default()
+                }.build(),
+                MessageBuilder {
+                    id: Id::new(101),
+                    timestamp: Some(timestamp),
+                    value: Some("msg2".into()),
+                    ..Default::default()
+                }.build(),
+            ]);
+
+            assert!(it.next().is_none());
+
+            // second entry
+
+            let (mut entry, mut buf) = BufEntryBuilder::from(vec![
+                MessageBuilder {
+                    value: Some("msg3".into()),
+                    ..Default::default()
+                },
+            ]).build();
+            seg.push(&mut entry, &mut buf).unwrap();
+            assert_eq!(entry.start_id(), Id::new(102).unwrap());
+            assert_eq!(entry.end_id(), Id::new(102).unwrap());
+            assert_eq!(act_entry.first_timestamp(), timestamp);
+            assert_eq!(act_entry.max_timestamp(), timestamp);
+
+            assert_eq!(seg.max_timestamp(), timestamp);
+        }
+        // Reopen the segment and check the content.
+        {
+            let seg = Segment::open(&seg_path, Default::default()).unwrap();
+
+            let mut it = seg.get(..);
+
+            let e = it.next().unwrap().unwrap();
+            it.complete_read().unwrap();
+            assert_eq!(e.start_id(), Id::new(100).unwrap());
+            assert_eq!(e.iter(it.buf()).count(), 2);
+
+            let e = it.next().unwrap().unwrap();
+            it.complete_read().unwrap();
+            assert_eq!(e.start_id(), Id::new(102).unwrap());
+            assert_eq!(e.iter(it.buf()).count(), 1);
+        }
+    }
 
     #[test]
     fn index_each_bytes() {
         let dir = mktemp::Temp::new_dir().unwrap();
-        let mut seg = Segment::create(&dir, Id::new(10).unwrap(), Options {
+        let mut seg = Segment::create(&dir, Id::new(10).unwrap(), Timestamp::min_value(), Options {
             index_each_bytes: MIN_INDEX_EACH_BYTES,
             .. Default::default()
         }).unwrap();

@@ -8,7 +8,7 @@ use crate::bytes::*;
 use crate::entry::BufEntry;
 use crate::entry::format::MIN_FRAME_LEN;
 use crate::error::*;
-use crate::message::Id;
+use crate::message::{Id, Timestamp};
 use crate::segment::{self, Segment};
 use crate::util::file_mutex::FileMutex;
 
@@ -24,6 +24,9 @@ pub enum Error {
 
     #[fail(display = "couldn't lock log directory {:?}", _0)]
     CantLockDir(PathBuf),
+
+    #[fail(display = "{}", _0)]
+    MaxTimestampNonMonotonic(Cow<'static, str>),
 
     #[fail(display = "IO error")]
     Io,
@@ -67,6 +70,7 @@ pub struct Log {
     segments: VecDeque<Segment>,
     max_segment_len: u32,
     _lock: FileMutex,
+    max_timestamp: Timestamp,
 }
 
 impl Log {
@@ -89,7 +93,7 @@ impl Log {
         let _lock = FileMutex::try_lock(&path.join(LOCK_FILE_NAME))
             .with_context(|_| Error::CantLockDir(path.clone()))?;
 
-        let mut segments = if exists {
+        let (mut segments, max_timestamp) = if exists {
             let mut segment_paths = Vec::new();
             let mut unknown = Vec::new();
             for dir_entry in fs::read_dir(&path).context(Error::Io)? {
@@ -126,13 +130,24 @@ impl Log {
             }
             segments.sort_by_key(|s| s.base_id());
 
-            segments.into()
+            for (i, segment) in segments.iter().enumerate() {
+                if i > 0 && segment.max_timestamp() < segments[i - 1].max_timestamp() {
+                    return Err(Error::MaxTimestampNonMonotonic(format!(
+                        "max. timestamp descreases between segments: {:?} and {:?}",
+                        segments[i - 1].path(), segment.path()).into()).into());
+                }
+            }
+            let max_timestamp = segments.last().map(|s| s.max_timestamp());
+
+            (segments.into(), max_timestamp)
         } else {
-            VecDeque::new()
+            (VecDeque::new(), None)
         };
+        let max_timestamp = max_timestamp.unwrap_or(Timestamp::min_value());
 
         if segments.is_empty() {
-            segments.push_back(Segment::create(&path, Id::min_value(), Default::default())
+            segments.push_back(Segment::create(&path, Id::min_value(), max_timestamp,
+                Default::default())
                 .with_more_context(|_| format!("creating segment 0 in {:?}", path))?);
         }
 
@@ -141,6 +156,7 @@ impl Log {
             segments,
             max_segment_len: options.max_segment_len,
             _lock,
+            max_timestamp,
         })
     }
 
@@ -154,7 +170,8 @@ impl Log {
         }
         if self.segments.back_mut().unwrap().len() + entry_len > self.max_segment_len {
             let base_id = self.segments.back_mut().unwrap().next_id();
-            self.segments.push_back(Segment::create(&self.path, base_id, Default::default())?);
+            self.segments.push_back(Segment::create(&self.path, base_id,
+                self.max_timestamp, Default::default())?);
         }
 
         self.segments.back_mut().unwrap().push(entry, buf)
