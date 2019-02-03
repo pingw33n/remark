@@ -270,7 +270,7 @@ impl Segment {
         entry.update(buf, Update {
             start_id: Some(self.next_id),
             first_timestamp: Some(Timestamp::now()),
-        }).more_context("updating entry")?;
+        });
 
         self.next_id = entry.end_id() + 1;
 

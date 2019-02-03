@@ -28,9 +28,6 @@ pub enum Error {
     #[fail(display = "{}", _0)]
     BadVersion(Cow<'static, str>),
 
-    #[fail(display = "{}", _0)]
-    BadUpdate(Cow<'static, str>),
-
     #[fail(display = "message IDs must have no gaps")]
     DenseRequired,
 
@@ -287,16 +284,14 @@ impl BufEntry {
         self.message_count
     }
 
-    pub fn update(&mut self, buf: &mut BytesMut, update: Update) -> Result<()> {
+    pub fn update(&mut self, buf: &mut BytesMut, update: Update) {
         let mut dirty = false;
         let buf = buf.as_mut_slice();
         if_chain! {
             if let Some(start_id) = update.start_id;
             if start_id != self.start_id;
             then {
-                if start_id.checked_add(cast::u64(self.end_id_delta)).is_none() {
-                    return Err(Error::BadUpdate("id overflow".into()).into());
-                }
+                assert!(start_id.checked_add(cast::u64(self.end_id_delta)).is_some());
                 self.start_id = start_id;
                 format::START_ID.set(buf, Some(start_id));
                 dirty = true;
@@ -306,12 +301,8 @@ impl BufEntry {
             if let Some(first_timestamp) = update.first_timestamp;
             if first_timestamp != self.first_timestamp;
             then {
-                let delta = first_timestamp.checked_delta(self.first_timestamp)
-                    .ok_or_else(|| Error::BadUpdate("first_timestamp overflow"
-                    .into()).into_error())?;
-                let max_timestamp = self.max_timestamp.checked_add_millis(delta)
-                    .ok_or_else(|| Error::BadUpdate("max_timestamp overflow"
-                    .into()).into_error())?;
+                let delta = first_timestamp - self.first_timestamp;
+                let max_timestamp = self.max_timestamp + delta;
 
                 self.first_timestamp = first_timestamp;
                 format::FIRST_TIMESTAMP.set(buf, first_timestamp);
@@ -325,7 +316,6 @@ impl BufEntry {
         if dirty {
             BufEntryBuilder::set_header_crc(buf);
         }
-        Ok(())
     }
 
     pub fn validate_body(&self, buf: &impl Buf, options: ValidBody) -> Result<()> {
@@ -798,7 +788,7 @@ mod test {
                 e.update(&mut buf, Update {
                     first_timestamp: Some(Timestamp::min_value()),
                     ..Default::default()
-                }).unwrap();
+                });
 
                 assert_matches!(val_err_opts(&e, &buf, false, true),
                         ErrorKind::Entry(Error::WithoutTimestampRequired));
