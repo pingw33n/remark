@@ -31,6 +31,12 @@ pub enum Error {
     #[fail(display = "{}", _0)]
     BadUpdate(Cow<'static, str>),
 
+    #[fail(display = "message IDs must have no gaps")]
+    DenseRequired,
+
+    #[fail(display = "all message timestamps must be zero")]
+    WithoutTimestampRequired,
+
     #[fail(display = "IO error")]
     Io,
 }
@@ -52,12 +58,6 @@ pub enum BadBody {
 
 #[derive(Clone, Debug, Eq, Fail, PartialEq)]
 pub enum BadMessages {
-    #[fail(display = "message IDs must have no gaps")]
-    DenseRequired,
-
-    #[fail(display = "all message timestamps must be equal to the first_timestamp")]
-    SingleTimestampRequired,
-
     #[fail(display = "first message timestamp differs from the one in the entry header")]
     FirstTimestampMismatch,
 
@@ -72,8 +72,9 @@ pub enum BadMessages {
 pub struct ValidBody {
     pub dense: bool,
 
-    /// Effectively this requires all `timestamp_delta`s are zero.
-    pub single_timestamp: bool,
+    /// Requires that all timestamps are zero: `first_timestamp`, `max_timestamp` and
+    /// `timestamp_delta`s of all messages.
+    pub without_timestamp: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -336,7 +337,12 @@ impl BufEntry {
 
         if options.dense && cast::u64(self.message_count) !=
                 cast::u64(self.end_id_delta) + 1 {
-            return Err(BadMessages::DenseRequired.into());
+            return Err(Error::DenseRequired.into());
+        }
+
+        if options.without_timestamp && (self.first_timestamp != Timestamp::epoch() ||
+                self.max_timestamp != Timestamp::epoch()) {
+            return Err(Error::WithoutTimestampRequired.into());
         }
 
         let buf = &buf.as_slice()[..self.frame_len];
@@ -353,10 +359,10 @@ impl BufEntry {
                 return Err(BadMessages::FirstTimestampMismatch.into());
             }
             if options.dense && msg.id - next_id != 0 {
-                return Err(BadMessages::DenseRequired.into());
+                return Err(Error::DenseRequired.into());
             }
-            if options.single_timestamp && msg.timestamp != self.first_timestamp {
-                return Err(BadMessages::SingleTimestampRequired.into());
+            if options.without_timestamp && msg.timestamp != self.first_timestamp {
+                return Err(Error::WithoutTimestampRequired.into());
             }
             if max_timestamp.is_none() || msg.timestamp > max_timestamp.unwrap() {
                 max_timestamp = Some(msg.timestamp);
@@ -682,10 +688,10 @@ mod test {
             use super::*;
 
             fn val_err_opts(e: &BufEntry, buf: &impl Buf,
-                    dense: bool, single_timestamp: bool) -> ErrorKind {
+                    dense: bool, without_timestamp: bool) -> ErrorKind {
                 e.validate_body(buf, ValidBody {
                     dense,
-                    single_timestamp,
+                    without_timestamp,
                 }).err().unwrap().kind().clone()
             }
 
@@ -769,7 +775,7 @@ mod test {
             }
 
             #[test]
-            fn not_single_timestamp() {
+            fn without_timestamp_violated_in_messages() {
                 let (e, buf) = BufEntryBuilder::from(vec![
                     MessageBuilder {
                         timestamp: Some(Timestamp::epoch()),
@@ -782,11 +788,24 @@ mod test {
                 ]).build();
 
                 assert_matches!(val_err_opts(&e, &buf, false, true),
-                        ErrorKind::Entry(Error::BadMessages(BadMessages::SingleTimestampRequired)));
+                        ErrorKind::Entry(Error::WithoutTimestampRequired));
             }
 
             #[test]
-            fn not_dense_inner() {
+            fn without_timestamp_violated_in_header() {
+                let (mut e, mut buf) = BufEntryBuilder::sparse(Id::new(10).unwrap(),
+                    Id::new(100).unwrap()).build();
+                e.update(&mut buf, Update {
+                    first_timestamp: Some(Timestamp::min_value()),
+                    ..Default::default()
+                }).unwrap();
+
+                assert_matches!(val_err_opts(&e, &buf, false, true),
+                        ErrorKind::Entry(Error::WithoutTimestampRequired));
+            }
+
+            #[test]
+            fn dense_violated_inner() {
                 // No gaps between message ids.
                 let (e, buf) = BufEntryBuilder::from(vec![
                     MessageBuilder::default(),
@@ -796,17 +815,17 @@ mod test {
                     },
                 ]).build();
                 assert_matches!(val_err_opts(&e, &buf, true, false),
-                    ErrorKind::Entry(Error::BadMessages(BadMessages::DenseRequired)));
+                    ErrorKind::Entry(Error::DenseRequired));
             }
 
             #[test]
-            fn not_dense_outer() {
+            fn dense_violated_outer() {
                 // No gaps after start_id and before end_id.
                 let mut b = BufEntryBuilder::sparse(Id::new(50).unwrap(), Id::new(100).unwrap());
                 b.message(MessageBuilder { id: Id::new(75), .. Default::default() });
                 let (e, buf) = b.build();
                 assert_matches!(val_err_opts(&e, &buf, true, false),
-                    ErrorKind::Entry(Error::BadMessages(BadMessages::DenseRequired)));
+                    ErrorKind::Entry(Error::DenseRequired));
             }
         }
     }

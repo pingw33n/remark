@@ -263,7 +263,7 @@ impl Segment {
         assert!(self.file.file.len() + buf.len() as u64 <= HARD_MAX_SEGMENT_LEN as u64);
 
         entry.validate_body(buf, ValidBody {
-            single_timestamp: true,
+            without_timestamp: true,
             ..Default::default()
         }).more_context("validating body")?;
 
@@ -525,14 +525,14 @@ mod test {
                     ..Default::default()
                 },
             ]).build();
-            entry.validate_body(&buf, ValidBody { single_timestamp: true, ..Default::default() }).unwrap();
+            entry.validate_body(&buf, ValidBody { without_timestamp: true, ..Default::default() }).unwrap();
             seg.push(&mut entry, &mut buf).unwrap();
 
             let mut it = seg.get(..);
 
             let act_entry = it.next().unwrap().unwrap();
             it.complete_read().unwrap();
-            act_entry.validate_body(it.buf(), ValidBody { dense: true, single_timestamp: false }).unwrap();
+            act_entry.validate_body(it.buf(), ValidBody { dense: true, ..Default::default() }).unwrap();
 
             let timestamp = entry.first_timestamp();
 
