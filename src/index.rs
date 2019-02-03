@@ -284,13 +284,12 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
         self.inner.lock().last_entry(&self.mmap)
     }
 
-    pub fn last_value(&self) -> Option<V> {
-        self.last_entry().map(|(_, v)| v)
+    pub fn last_key(&self) -> Option<K> {
+        self.last_entry().map(|(k, _)| k)
     }
 
-    fn used_buf(&self) -> &[u8] {
-        // TODO This can be made fully non-blocking by using atomic len.
-        self.inner.lock().used_buf(&self.mmap).unwrap_or(&[])
+    pub fn last_value(&self) -> Option<V> {
+        self.last_entry().map(|(_, v)| v)
     }
 
     pub fn entry_by_key(&self, key: K) -> Option<(K, V)> {
@@ -350,6 +349,11 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
                     .map_mut(&file)
             }.context(Error::Io)?)
         })
+    }
+
+    fn used_buf(&self) -> &[u8] {
+        // TODO This can be made fully non-blocking by using atomic len.
+        self.inner.lock().used_buf(&self.mmap).unwrap_or(&[])
     }
 
     fn binary_search<DP, F>(buf: &[u8], f: F) -> StdResult<usize, usize>
