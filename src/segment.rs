@@ -46,6 +46,9 @@ pub enum Error {
     #[fail(display = "fsync of segment file failed")]
     Fsync,
 
+    #[fail(display = "timestamp index is empty for existing segment")]
+    TimestampIndexEmpty,
+
     #[fail(display = "IO error")]
     Io,
 }
@@ -199,8 +202,17 @@ impl Segment {
         let timestamp_index = if create_new {
             Index::create_new(&timestamp_index_path, index_mode)
         } else {
-            Index::open(&timestamp_index_path, index_mode)
-        } .with_more_context(|_| format!("opening timestamp index file {:?}", timestamp_index_path))?;
+            match Index::open(&timestamp_index_path, index_mode) {
+                Ok(idx) => {
+                    if idx.is_empty() {
+                        Err(Error::TimestampIndexEmpty.into_error())
+                    } else {
+                        Ok(idx)
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        }.with_more_context(|_| format!("opening timestamp index file {:?}", timestamp_index_path))?;
 
         let next_id = {
             let id = Self::local_to_global_id0(base_id, id_index.last_key().unwrap_or(0));
@@ -502,6 +514,9 @@ impl Iterator for Iter {
 #[cfg(test)]
 mod test {
     use super::*;
+    use super::Error;
+    use assert_matches::assert_matches;
+    use std::fs;
     use crate::entry::{BufEntryBuilder, ValidBody};
     use crate::message::MessageBuilder;
     
@@ -621,5 +636,20 @@ mod test {
         let pos = seg.len();
         seg.push(&mut entry, &mut buf).unwrap();
         assert_eq!(seg.id_index.entry_by_key(1), Some((1, pos)));
+    }
+
+    #[test]
+    fn fails_if_timestamp_index_empty() {
+        let dir = mktemp::Temp::new_dir().unwrap();
+        let (path, base_id) = {
+            let seg = Segment::create_new(&dir, Id::min_value(), Timestamp::min_value(),
+                Default::default()).unwrap();
+            (seg.path().clone(), seg.base_id())
+        };
+        let idx_path = dir.to_path_buf().join(format!("{:020}{}",
+            base_id, TIMESTAMP_INDEX_FILE_SUFFIX));
+        fs::OpenOptions::new().write(true).create(true).truncate(true).open(idx_path).unwrap();
+        assert_matches!(Segment::open(path, Default::default()).err().unwrap().kind(),
+            ErrorKind::Segment(Error::TimestampIndexEmpty));
     }
 }
