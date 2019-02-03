@@ -146,7 +146,7 @@ impl Log {
         let max_timestamp = max_timestamp.unwrap_or(Timestamp::min_value());
 
         if segments.is_empty() {
-            segments.push_back(Segment::create(&path, Id::min_value(), max_timestamp,
+            segments.push_back(Segment::create_new(&path, Id::min_value(), max_timestamp,
                 Default::default())
                 .with_more_context(|_| format!("creating segment 0 in {:?}", path))?);
         }
@@ -170,7 +170,7 @@ impl Log {
         }
         if self.segments.back_mut().unwrap().len() + entry_len > self.max_segment_len {
             let base_id = self.segments.back_mut().unwrap().next_id();
-            self.segments.push_back(Segment::create(&self.path, base_id,
+            self.segments.push_back(Segment::create_new(&self.path, base_id,
                 self.max_timestamp, Default::default())?);
         }
 

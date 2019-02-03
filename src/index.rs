@@ -200,16 +200,24 @@ pub struct Index<K: Field, V: Field, KP: DupPolicy = DupNotAllowed> {
 impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
     const ENTRY_LEN: usize = K::LEN + V::LEN;
 
-    pub fn open_or_create(path: impl AsRef<Path>, mode: Mode) -> Result<Self> {
+    pub fn open(path: impl AsRef<Path>, mode: Mode) -> Result<Self> {
+        Self::new(path, mode, false)
+    }
+
+    pub fn create_new(path: impl AsRef<Path>, mode: Mode) -> Result<Self> {
+        Self::new(path, mode, true)
+    }
+
+    fn new(path: impl AsRef<Path>, mode: Mode, create_new: bool) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
 
         let mut open_opts = OpenOptions::new();
         open_opts
             .write(true)
             .read(true);
-        if mode.is_growable() {
+        if create_new {
             open_opts
-                .create(true);
+                .create_new(true);
         }
         let file = open_opts.open(&path)
             .context(Error::Io)?;
@@ -473,7 +481,7 @@ mod test {
 
         let f = mktemp::Temp::new_file().unwrap();
         {
-            let idx: Arc<Index<u64, u32>> = Arc::new(Index::open_or_create(&f, Mode::Growable {
+            let idx: Arc<Index<u64, u32>> = Arc::new(Index::open(&f, Mode::Growable {
                 preallocate: PREALLOCATE,
                 max_capacity: MAX_CAPACITY,
             }).unwrap());
@@ -520,7 +528,8 @@ mod test {
         let f_len = || fs::metadata(&f).unwrap().len();
 
         {
-            let idx: Index<u32, u64> = Index::open_or_create(&f, Mode::Growable {
+            fs::remove_file(&f).unwrap();
+            let idx: Index<u32, u64> = Index::create_new(&f, Mode::Growable {
                 preallocate: 2,
                 max_capacity: 5,
             }).unwrap();
@@ -553,7 +562,7 @@ mod test {
         }
         assert_eq!(f_len(), 5 * 12);
         {
-            let idx: Index<u32, u64> = Index::open_or_create(&f, Mode::Static).unwrap();
+            let idx: Index<u32, u64> = Index::open(&f, Mode::Static).unwrap();
 
             assert_eq!(idx.len(), 5);
             for k in 1..=5 {
@@ -573,7 +582,7 @@ mod test {
     #[test]
     fn push_misorder_key_no_dup() {
         let f = mktemp::Temp::new_file().unwrap();
-        let idx: Index<u32, u64> = Index::open_or_create(&f, Mode::Growable {
+        let idx: Index<u32, u64> = Index::open(&f, Mode::Growable {
             preallocate: 5,
             max_capacity: 5,
         }).unwrap();
@@ -593,7 +602,7 @@ mod test {
     #[test]
     fn push_misorder_key_dup_allowed() {
         let f = mktemp::Temp::new_file().unwrap();
-        let idx: Index<u64, u32, DupAllowed> = Index::open_or_create(&f, Mode::Growable {
+        let idx: Index<u64, u32, DupAllowed> = Index::open(&f, Mode::Growable {
             preallocate: 5,
             max_capacity: 5,
         }).unwrap();
@@ -610,7 +619,7 @@ mod test {
     #[test]
     fn search_with_dup_allowed() {
         let f = mktemp::Temp::new_file().unwrap();
-        let idx: Index<u64, u32, DupAllowed> = Index::open_or_create(&f, Mode::Growable {
+        let idx: Index<u64, u32, DupAllowed> = Index::open(&f, Mode::Growable {
             preallocate: 5,
             max_capacity: 5,
         }).unwrap();

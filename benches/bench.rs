@@ -8,7 +8,7 @@ fn bench(c: &mut Criterion) {
         use std::sync::Arc;
 
         let f = mktemp::Temp::new_file().unwrap();
-        let idx = Arc::new(IdIndex::open_or_create(&f, Mode::Growable {
+        let idx = Arc::new(IdIndex::open(&f, Mode::Growable {
             preallocate: 1000,
             max_capacity: 1000,
         }).unwrap());

@@ -14,6 +14,7 @@ use std::borrow::Borrow;
 pub struct OpenOptions {
     read_only: bool,
     create: bool,
+    create_new: bool,
     truncate: bool,
 }
 
@@ -22,6 +23,7 @@ impl OpenOptions {
         Self {
             read_only: false,
             create: false,
+            create_new: false,
             truncate: false,
         }
     }
@@ -33,6 +35,11 @@ impl OpenOptions {
 
     pub fn create(&mut self, create: bool) -> &mut Self {
         self.create = create;
+        self
+    }
+
+    pub fn create_new(&mut self, create_new: bool) -> &mut Self {
+        self.create_new = create_new;
         self
     }
 
@@ -108,6 +115,7 @@ impl File {
             .read(true)
             .append(!options.read_only)
             .create(options.create)
+            .create_new(options.create_new)
             .open(&path)?;
 
         if options.truncate {

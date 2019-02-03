@@ -37,8 +37,8 @@ pub enum Error {
     #[fail(display = "error opening segment data file {:?}", _0)]
     Open(PathBuf),
 
-    #[fail(display = "error creating segment data file {:?}", _0)]
-    Create(PathBuf),
+    #[fail(display = "error creating new segment data file {:?}", _0)]
+    CreateNew(PathBuf),
 
     #[fail(display = "{}", _0)]
     SegmentTruncated(Cow<'static, str>),
@@ -88,7 +88,7 @@ impl Default for Options {
 #[derive(Clone, Copy, Debug)]
 enum Mode {
     Open,
-    CreateAndOverwrite { max_timestamp: Timestamp },
+    CreateNew { max_timestamp: Timestamp },
 }
 
 pub struct Segment {
@@ -143,9 +143,9 @@ impl Segment {
         Self::new(dir, base_id, Mode::Open, options)
     }
 
-    pub fn create(path: impl AsRef<Path>, base_id: Id, max_timestamp: Timestamp,
+    pub fn create_new(path: impl AsRef<Path>, base_id: Id, max_timestamp: Timestamp,
             options: Options) -> Result<Self> {
-        Self::new(path, base_id, Mode::CreateAndOverwrite { max_timestamp }, options)
+        Self::new(path, base_id, Mode::CreateNew { max_timestamp }, options)
     }
 
     fn new(path: impl AsRef<Path>, base_id: Id, mode: Mode, options: Options) -> Result<Self> {
@@ -157,13 +157,12 @@ impl Segment {
         let base_path = PathBuf::from(path.as_ref());
 
         let path = base_path.join(format!("{}{}", base_name, DATA_FILE_SUFFIX));
-        let create_and_overwrite = matches!(mode, Mode::CreateAndOverwrite { .. });
+        let create_new = matches!(mode, Mode::CreateNew { .. });
         let file = OpenOptions::new()
-            .create(create_and_overwrite)
-            .truncate(create_and_overwrite)
+            .create_new(create_new)
             .open(&path)
-            .with_context(|_| if create_and_overwrite {
-                Error::Create(path.clone())
+            .with_context(|_| if create_new {
+                Error::CreateNew(path.clone())
             } else {
                 Error::Open(path.clone())
             })?;
@@ -190,12 +189,18 @@ impl Segment {
         };
 
         let id_index_path = base_path.join(format!("{}{}", base_name, ID_INDEX_FILE_SUFFIX));
-        let id_index = Index::open_or_create(&id_index_path, index_mode)
-            .with_more_context(|_| format!("opening id index file {:?}", id_index_path))?;
+        let id_index = if create_new {
+            Index::create_new(&id_index_path, index_mode)
+        } else {
+            Index::open(&id_index_path, index_mode)
+        }.with_more_context(|_| format!("opening id index file {:?}", id_index_path))?;
 
         let timestamp_index_path = base_path.join(format!("{}{}", base_name, TIMESTAMP_INDEX_FILE_SUFFIX));
-        let timestamp_index = Index::open_or_create(&timestamp_index_path, index_mode)
-            .with_more_context(|_| format!("opening timestamp index file {:?}", timestamp_index_path))?;
+        let timestamp_index = if create_new {
+            Index::create_new(&timestamp_index_path, index_mode)
+        } else {
+            Index::open(&timestamp_index_path, index_mode)
+        } .with_more_context(|_| format!("opening timestamp index file {:?}", timestamp_index_path))?;
 
         let next_id = {
             let id = Self::local_to_global_id0(base_id, id_index.last_key().unwrap_or(0));
@@ -208,7 +213,7 @@ impl Segment {
             last_id.map(|v| v + 1).unwrap_or(base_id)
         };
 
-        let max_timestamp = if let Mode::CreateAndOverwrite { max_timestamp } = mode {
+        let max_timestamp = if let Mode::CreateNew { max_timestamp } = mode {
             timestamp_index.push(max_timestamp, 0)
                 .more_context("pushing checkpoint entry into timestamp index")?;
             max_timestamp
@@ -505,7 +510,7 @@ mod test {
         let dir = mktemp::Temp::new_dir().unwrap();
         let seg_path;
         {
-            let mut seg = Segment::create(&dir, Id::new(100).unwrap(), Timestamp::min_value(),
+            let mut seg = Segment::create_new(&dir, Id::new(100).unwrap(), Timestamp::min_value(),
                 Default::default()).unwrap();
 
             seg_path = seg.path().clone();
@@ -598,7 +603,7 @@ mod test {
     #[test]
     fn index_each_bytes() {
         let dir = mktemp::Temp::new_dir().unwrap();
-        let mut seg = Segment::create(&dir, Id::new(10).unwrap(), Timestamp::min_value(), Options {
+        let mut seg = Segment::create_new(&dir, Id::new(10).unwrap(), Timestamp::min_value(), Options {
             index_each_bytes: MIN_INDEX_EACH_BYTES,
             .. Default::default()
         }).unwrap();
