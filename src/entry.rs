@@ -142,7 +142,7 @@ impl BufEntry {
         Self::check_frame_len(frame_len)?;
 
         let header_crc = HEADER_CRC.get(buf);
-        let actual_header_crc = crc(&buf[format::HEADER_CRC_RANGE]);
+        let actual_header_crc = crc(&buf.as_slice()[format::HEADER_CRC_RANGE]);
         if header_crc != actual_header_crc {
             return Err(Error::BadHeader("header CRC check failed".into()).into());
         }
@@ -265,7 +265,7 @@ impl BufEntry {
     pub fn validate_body(&self, buf: &impl Buf, options: ValidBody) -> Result<()> {
         assert!(buf.len() >= self.frame_len, "invalid buf");
 
-        if self.body_crc != crc(&buf[format::BODY_CRC_START..self.frame_len]) {
+        if self.body_crc != crc(&buf.as_slice()[format::BODY_CRC_START..self.frame_len]) {
             return Err(BadBody::BadCrc.into());
         }
 
@@ -274,7 +274,7 @@ impl BufEntry {
             return Err(BadMessages::DenseRequired.into());
         }
 
-        let buf = &buf[..self.frame_len];
+        let buf = &buf.as_slice()[..self.frame_len];
         let mut rd = Cursor::new(buf);
         rd.set_position(format::MESSAGES_START);
         let mut next_id = self.start_id;

@@ -5,20 +5,6 @@ use std::sync::Arc;
 use std::ops;
 use std::cmp;
 
-pub trait Buf: AsRef<[u8]> + ops::Deref<Target=[u8]> {
-    fn as_slice(&self) -> &[u8];
-    fn get_u8(&self, i: usize) -> u8;
-    fn get_i8(&self, i: usize) -> i8 {
-        self.get_u8(i) as i8
-    }
-    fn get_u16<B: ByteOrder>(&self, i: usize) -> u16;
-    fn get_i16<B: ByteOrder>(&self, i: usize) -> i16;
-    fn get_u32<B: ByteOrder>(&self, i: usize) -> u32;
-    fn get_i32<B: ByteOrder>(&self, i: usize) -> i32;
-    fn get_u64<B: ByteOrder>(&self, i: usize) -> u64;
-    fn get_i64<B: ByteOrder>(&self, i: usize) -> i64;
-}
-
 macro_rules! impl_get {
     ($g:ident, $r:ident: $ty:ty) => {
         fn $g<B: ByteOrder>(&self, i: usize) -> $ty {
@@ -26,6 +12,34 @@ macro_rules! impl_get {
         }
     };
 }
+
+pub trait Buf: AsRef<[u8]>  {
+    fn as_slice(&self) -> &[u8] {
+        self.as_ref()
+    }
+
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    fn get_u8(&self, i: usize) -> u8 {
+        self.as_slice()[i]
+    }
+
+    fn get_i8(&self, i: usize) -> i8 {
+        self.get_u8(i) as i8
+    }
+
+    impl_get!(get_u16, read_u16: u16);
+    impl_get!(get_i16, read_i16: i16);
+    impl_get!(get_u32, read_u32: u32);
+    impl_get!(get_i32, read_i32: i32);
+    impl_get!(get_u64, read_u64: u64);
+    impl_get!(get_i64, read_i64: i64);
+}
+
+impl<T: AsRef<[u8]>> Buf for T {}
+
 
 #[derive(Clone)]
 pub struct Bytes {
@@ -42,26 +56,9 @@ impl Bytes {
     }
 }
 
-impl Buf for Bytes {
-    fn as_slice(&self) -> &[u8] {
-        &self.vec[self.range.start..self.range.end]
-    }
-
-    fn get_u8(&self, i: usize) -> u8 {
-        self.as_slice()[i]
-    }
-
-    impl_get!(get_u16, read_u16: u16);
-    impl_get!(get_i16, read_i16: i16);
-    impl_get!(get_u32, read_u32: u32);
-    impl_get!(get_i32, read_i32: i32);
-    impl_get!(get_u64, read_u64: u64);
-    impl_get!(get_i64, read_i64: i64);
-}
-
 impl AsRef<[u8]> for Bytes {
     fn as_ref(&self) -> &[u8] {
-        self.as_slice()
+        &self.vec[self.range.start..self.range.end]
     }
 }
 
@@ -184,26 +181,9 @@ impl BytesMut {
     impl_set!(set_i64, write_i64: i64);
 }
 
-impl Buf for BytesMut {
-    fn as_slice(&self) -> &[u8] {
-        &self.vec
-    }
-
-    fn get_u8(&self, i: usize) -> u8 {
-        self.as_slice()[i]
-    }
-
-    impl_get!(get_u16, read_u16: u16);
-    impl_get!(get_i16, read_i16: i16);
-    impl_get!(get_u32, read_u32: u32);
-    impl_get!(get_i32, read_i32: i32);
-    impl_get!(get_u64, read_u64: u64);
-    impl_get!(get_i64, read_i64: i64);
-}
-
 impl AsRef<[u8]> for BytesMut {
     fn as_ref(&self) -> &[u8] {
-        self.as_slice()
+        &self.vec
     }
 }
 
