@@ -92,6 +92,7 @@ pub struct Segment {
     file: Arc<SegFile>,
     base_id: Id,
     next_id: Id,
+    last_pos: Option<u32>,
     max_timestamp: Timestamp,
     id_index:  IdIndex,
     timestamp_index: TimestampIndex,
@@ -204,7 +205,7 @@ impl Segment {
             }
         }.context_with(|_| format!("opening timestamp index file {:?}", timestamp_index_path))?;
 
-        let next_id = {
+        let (next_id, last_pos) = {
             let id = Self::local_to_global_id0(base_id, id_index.last_key().unwrap_or(0));
             let mut it = Self::get0(&file, base_id, Id::max_value(), &id_index, id..);
             let mut last_id = None;
@@ -212,6 +213,7 @@ impl Segment {
                 let entry = entry?;
                 last_id = Some(entry.end_id());
             }
+            let last_pos = it.last_position();
 
             let file_len = file.file.len();
             let valid_file_len = cast::u64(it.next_position());
@@ -223,7 +225,7 @@ impl Segment {
                     .context_with(|_| format!("while truncating file {:?}", file.path))?;
             }
 
-            last_id.map(|v| v + 1).unwrap_or(base_id)
+            (last_id.map(|v| v + 1).unwrap_or(base_id), last_pos)
         };
 
         let max_timestamp = if let Mode::CreateNew { max_timestamp } = mode {
@@ -247,6 +249,7 @@ impl Segment {
             file,
             base_id,
             next_id,
+            last_pos,
             max_timestamp,
             id_index,
             timestamp_index,
@@ -273,6 +276,14 @@ impl Segment {
         self.next_id
     }
 
+    pub fn last_pos(&self) -> Option<u32> {
+        self.last_pos
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.next_id == self.base_id
+    }
+
     pub fn max_timestamp(&self) -> Timestamp {
         self.max_timestamp
     }
@@ -293,6 +304,7 @@ impl Segment {
         self.next_id = entry.end_id() + 1;
 
         let pos = self.len_bytes();
+        self.last_pos = Some(pos);
 
         self.file.file.writer().write_all(&buf[..]).wrap_err_id(ErrorId::Io)?;
 
@@ -332,6 +344,27 @@ impl Segment {
     pub fn force_fsync(&mut self) -> Result<()> {
         self.file.file.sync_all().wrap_err_id(ErrorId::Io)?;
         self.bytes_sync_last_fsync = 0;
+        Ok(())
+    }
+
+    pub fn make_read_only(&mut self) -> Result<()> {
+        if_chain! {
+            if let Some(last_pos) = self.last_pos;
+            if last_pos > 0;
+            let last_lid = self.global_to_local_id(self.next_id - 1);
+            if self.id_index.last_key().map(|v| v < last_lid).unwrap_or(true);
+            then {
+                self.id_index.push(last_lid, last_pos)
+                    .context("pushing to id index (final checkpoint)")?;
+                self.timestamp_index.push(self.max_timestamp, last_lid + 1)
+                    .context("pushing to timestamp index (final checkpoint)")?;
+            }
+        }
+        self.force_fsync()?;
+        self.id_index.make_static()
+            .context("making id index read-only")?;
+        self.timestamp_index.make_static()
+            .context("making timestamp index read-only")?;
         Ok(())
     }
 
@@ -686,5 +719,44 @@ mod test {
         seg.force_fsync().unwrap();
         assert_eq!(seg.len_bytes(), expected_len);
         assert_eq!(fs::metadata(&path).unwrap().len(), expected_len as u64);
+    }
+
+    #[test]
+    fn make_read_only() {
+        let dir = mktemp::Temp::new_dir().unwrap();
+
+        let mut seg = Segment::create_new(&dir, Id::min_value(), Timestamp::min_value(),
+            Default::default()).unwrap();
+        let (mut entry, mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
+        assert_eq!(seg.last_pos(), None);
+
+        seg.push(&mut entry, &mut buf).unwrap();
+        assert_eq!(seg.last_pos(), Some(0));
+        let expected_last_pos = seg.len_bytes();
+
+        let (mut entry, mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
+        seg.push(&mut entry, &mut buf).unwrap();
+        assert!(seg.len_bytes() > expected_last_pos);
+        assert_eq!(seg.last_pos(), Some(expected_last_pos));
+        assert!(seg.id_index.is_empty());
+        assert_eq!(seg.timestamp_index.len(), 1);
+
+        seg.make_read_only().unwrap();
+        seg.make_read_only().unwrap();
+
+        let idx = &seg.id_index;
+        assert_eq!(idx.len(), 1);
+        assert_eq!(idx.capacity(), 1);
+        assert_eq!(idx.max_capacity(), 1);
+        assert_eq!(fs::metadata(idx.path()).unwrap().len(), IdIndex::ENTRY_LEN as u64);
+        assert_eq!(idx.entry_by_key(1), Some((1, expected_last_pos)));
+
+        let idx = &seg.timestamp_index;
+        assert_eq!(idx.len(), 2);
+        assert_eq!(idx.capacity(), 2);
+        assert_eq!(idx.max_capacity(), 2);
+        assert_eq!(fs::metadata(idx.path()).unwrap().len(), TimestampIndex::ENTRY_LEN as u64 * 2);
+        assert_eq!(idx.entry_by_key(seg.max_timestamp()), Some((seg.max_timestamp(), 2)));
+
     }
 }

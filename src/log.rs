@@ -165,7 +165,12 @@ impl Log {
                 buf.len(), self.max_segment_len)));
         }
         if self.segments.back_mut().unwrap().len_bytes() + entry_len > self.max_segment_len {
-            let base_id = self.segments.back_mut().unwrap().next_id();
+            let base_id = {
+                let cur_seg = self.segments.back_mut().unwrap();
+                cur_seg.make_read_only()
+                    .context_with(|_| format!("making segment {:?} read-only", cur_seg.path()))?;
+                cur_seg.next_id()
+            };
             self.segments.push_back(Segment::create_new(&self.path, base_id,
                 self.max_timestamp, Default::default())?);
         }
