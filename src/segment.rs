@@ -214,10 +214,11 @@ impl Segment {
             }
 
             let file_len = file.file.len();
-            if file_len > it.file_position() {
+            let valid_file_len = cast::u64(it.next_position());
+            if file_len > valid_file_len {
                 warn!("detected trailing garbage in segment {:?} length {}, truncating to {}",
-                    file.path, file_len, it.file_position());
-                file.file.truncate(it.file_position())
+                    file.path, file_len, it.next_position());
+                file.file.truncate(valid_file_len)
                     .wrap_err_id(ErrorId::Io)
                     .context_with(|_| format!("while truncating file {:?}", file.path))?;
             }
@@ -411,6 +412,7 @@ pub struct Iter {
     eof: bool,
     buf: BytesMut,
     file_grow_check: Option<u64>,
+    last_position: Option<u32>,
 }
 
 impl Iter {
@@ -425,6 +427,7 @@ impl Iter {
             eof: force_eof,
             buf: BytesMut::new(),
             file_grow_check: None,
+            last_position: None,
         }
     }
 
@@ -440,8 +443,15 @@ impl Iter {
         &mut self.buf
     }
 
-    pub fn file_position(&self) -> u64 {
-        self.rd.position() + self.frame_len.map(|v| cast::u64(v)).unwrap_or(0)
+    /// File position where the last entry was read from.
+    pub fn last_position(&self) -> Option<u32> {
+        self.last_position
+    }
+
+    /// File position where the next entry will be read from.
+    pub fn next_position(&self) -> u32 {
+        cast::u32(self.rd.position()).unwrap() +
+            self.frame_len.map(|v| cast::u32(v).unwrap()).unwrap_or(0)
     }
 
     pub fn complete_read(&mut self) -> Result<()> {
@@ -488,6 +498,7 @@ impl Iterator for Iter {
                 self.rd.advance((frame_len - format::FRAME_PROLOG_LEN) as u64);
                 self.frame_len = None;
             }
+            let last_position = cast::u32(self.rd.position()).unwrap();
             break match BufEntry::read_prolog(&mut self.rd, &mut self.buf) {
                 Ok(Some(entry)) => {
                     let start_id = entry.start_id();
@@ -500,6 +511,7 @@ impl Iterator for Iter {
                         continue;
                     }
                     self.eof = start_id == self.end_id - 1;
+                    self.last_position = Some(last_position);
                     Some(Ok(entry))
                 }
                 Ok(None) => {
