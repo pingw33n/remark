@@ -171,12 +171,12 @@ impl Segment {
         // TODO rebuild indexes if corrupted.
 
         let index_mode = if options.read_only {
-            index::Mode::Static
+            index::Mode::ReadOnly
         } else {
             let index_max_capacity = cast::usize(HARD_MAX_SEGMENT_LEN / options.index_each_bytes);
             let index_preallocate = cmp::min(cast::usize(options.index_preallocate),
                 index_max_capacity);
-            index::Mode::Growable {
+            index::Mode::ReadWrite {
                 preallocate: index_preallocate,
                 max_capacity: index_max_capacity,
             }
@@ -361,9 +361,9 @@ impl Segment {
             }
         }
         self.force_fsync()?;
-        self.id_index.make_static()
+        self.id_index.make_read_only()
             .context("making id index read-only")?;
-        self.timestamp_index.make_static()
+        self.timestamp_index.make_read_only()
             .context("making timestamp index read-only")?;
         Ok(())
     }

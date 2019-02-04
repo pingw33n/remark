@@ -1,6 +1,5 @@
 use byteorder::{BigEndian, ByteOrder};
 use log::error;
-use matches::matches;
 use memmap::{MmapMut, MmapOptions};
 use parking_lot::Mutex;
 use std::cmp::{self, Ord, Ordering};
@@ -23,7 +22,7 @@ pub enum ErrorId {
     #[fail(display = "attempted to push index entries in wrong order")]
     PushMisordered,
 
-    #[fail(display = "index cant grow because it's already at max capacity or is opened in static mode")]
+    #[fail(display = "index cant grow because it's already at max capacity or is opened in read-only mode")]
     CantGrow,
 
     #[fail(display = "IO error")]
@@ -89,24 +88,14 @@ impl Field for Timestamp {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Mode {
-    Static,
+    ReadOnly,
 
-    Growable {
+    ReadWrite {
         /// Number of entries index will grow by when capacity exceeded, up to `max_capacity`.
         preallocate: usize,
 
         /// Maximum capacity index can grow to.
         max_capacity: usize,
-    }
-}
-
-impl Mode {
-    pub fn is_static(&self) -> bool {
-        matches!(self, Mode::Static)
-    }
-
-    pub fn is_growable(&self) -> bool {
-        matches!(self, Mode::Growable { .. })
     }
 }
 
@@ -235,7 +224,7 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
         let len_bytes = file_len;
 
         let mut capacity_bytes = file_len;
-        let (preallocate_bytes, max_capacity_bytes) = if let Mode::Growable { preallocate, max_capacity } = mode {
+        let (preallocate_bytes, max_capacity_bytes) = if let Mode::ReadWrite { preallocate, max_capacity } = mode {
             assert!(preallocate > 0);
             let preallocate_bytes = preallocate.checked_mul(Self::ENTRY_LEN).unwrap();
             if capacity_bytes < preallocate_bytes {
@@ -335,14 +324,14 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
         self.mmap.as_ref().unwrap().flush().wrap_err_id(ErrorId::Io).map_err(|e| e.into())
     }
 
-    /// Similar to `compact()` but also shrinks `max_capacity` effectively making thins index
-    /// static (non-growable).
-    pub fn make_static(&self) -> Result<()> {
+    /// Similar to `compact()` but also shrinks `max_capacity` effectively making this index
+    /// read-only (non-growable).
+    pub fn make_read_only(&self) -> Result<()> {
         self.compact0(true)
     }
 
     /// Sets capacity to the amount this index actually uses. Doesn't change `max_capacity` so
-    /// it's still possible push entries afterwards unless `make_static()` was already called.
+    /// it's still possible push entries afterwards unless `make_read_only()` was previously called.
     pub fn compact(&self) -> Result<()> {
         self.compact0(false)
     }
@@ -461,7 +450,7 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
 
 impl<K: Field, V: Field, KP: DupPolicy> Drop for Index<K, V, KP> {
     fn drop(&mut self) {
-        let _ = self.make_static()
+        let _ = self.make_read_only()
             .map_err(|e| error!("[{:?}] error compacting index: {:?}",
                 self.path, e));
     }
@@ -497,7 +486,7 @@ mod test {
 
         let f = mktemp::Temp::new_file().unwrap();
         {
-            let idx: Arc<Index<u64, u32>> = Arc::new(Index::open(&f, Mode::Growable {
+            let idx: Arc<Index<u64, u32>> = Arc::new(Index::open(&f, Mode::ReadWrite {
                 preallocate: PREALLOCATE,
                 max_capacity: MAX_CAPACITY,
             }).unwrap());
@@ -545,7 +534,7 @@ mod test {
 
         {
             fs::remove_file(&f).unwrap();
-            let idx: Index<u32, u64> = Index::create_new(&f, Mode::Growable {
+            let idx: Index<u32, u64> = Index::create_new(&f, Mode::ReadWrite {
                 preallocate: 2,
                 max_capacity: 5,
             }).unwrap();
@@ -578,7 +567,7 @@ mod test {
         }
         assert_eq!(f_len(), 5 * 12);
         {
-            let idx: Index<u32, u64> = Index::open(&f, Mode::Static).unwrap();
+            let idx: Index<u32, u64> = Index::open(&f, Mode::ReadOnly).unwrap();
 
             assert_eq!(idx.len(), 5);
             for k in 1..=5 {
@@ -598,7 +587,7 @@ mod test {
     #[test]
     fn push_misorder_key_no_dup() {
         let f = mktemp::Temp::new_file().unwrap();
-        let idx: Index<u32, u64> = Index::open(&f, Mode::Growable {
+        let idx: Index<u32, u64> = Index::open(&f, Mode::ReadWrite {
             preallocate: 5,
             max_capacity: 5,
         }).unwrap();
@@ -618,7 +607,7 @@ mod test {
     #[test]
     fn push_misorder_key_dup_allowed() {
         let f = mktemp::Temp::new_file().unwrap();
-        let idx: Index<u64, u32, DupAllowed> = Index::open(&f, Mode::Growable {
+        let idx: Index<u64, u32, DupAllowed> = Index::open(&f, Mode::ReadWrite {
             preallocate: 5,
             max_capacity: 5,
         }).unwrap();
@@ -635,7 +624,7 @@ mod test {
     #[test]
     fn search_with_dup_allowed() {
         let f = mktemp::Temp::new_file().unwrap();
-        let idx: Index<u64, u32, DupAllowed> = Index::open(&f, Mode::Growable {
+        let idx: Index<u64, u32, DupAllowed> = Index::open(&f, Mode::ReadWrite {
             preallocate: 5,
             max_capacity: 5,
         }).unwrap();
