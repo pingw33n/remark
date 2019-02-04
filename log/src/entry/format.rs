@@ -30,6 +30,7 @@ macro_rules! fields {
 }
 
 type OptionId = Option<Id>;
+type OptionTimestamp = Option<Timestamp>;
 
 fields! {
     FRAME_LEN: u32 = 0;
@@ -37,8 +38,8 @@ fields! {
     VERSION: u8;
     START_ID: OptionId;
     END_ID_DELTA: u32;
-    FIRST_TIMESTAMP: Timestamp;
-    MAX_TIMESTAMP: Timestamp;
+    FIRST_TIMESTAMP: OptionTimestamp;
+    MAX_TIMESTAMP: OptionTimestamp;
     FLAGS: u16;
     TERM: u64;
     BODY_CRC: u32;
@@ -173,17 +174,19 @@ impl FieldType for Option<Id> {
     }
 }
 
-impl FieldType for Timestamp {
+impl FieldType for Option<Timestamp> {
+    const LEN: usize = i64::LEN;
+
     fn get(buf: &impl Buf, i: usize) -> Self {
-        i64::get(buf, i).into()
+        Timestamp::from_millis(i64::get(buf, i))
     }
 
     fn set(&self, buf: &mut [u8]) {
-        self.millis().set(buf);
+        self.unwrap().millis().set(buf);
     }
 
     fn write(&self, wr: &mut Write) -> io::Result<()> {
-        self.millis().write(wr)
+        self.unwrap().millis().write(wr)
     }
 }
 

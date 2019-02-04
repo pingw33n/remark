@@ -75,14 +75,15 @@ impl Field for i64 {
 }
 
 impl Field for Timestamp {
-    const LEN: usize = u64::LEN;
+    const LEN: usize = i64::LEN;
 
     fn encode(&self, buf: &mut [u8]) {
         self.millis().encode(buf)
     }
 
     fn decode(buf: &[u8]) -> Self {
-        i64::decode(buf).into()
+        // FIXME remove this unwrap()
+        Self::from_millis(i64::decode(buf)).unwrap()
     }
 }
 

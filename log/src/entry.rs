@@ -163,8 +163,10 @@ impl BufEntry {
         let end_id = start_id.checked_add(cast::u64(end_id_delta)).ok_or_else(||
             Error::new(ErrorId::BadHeader, "end_id overflows u64"))?;
 
-        let first_timestamp = FIRST_TIMESTAMP.get(buf);
-        let max_timestamp = MAX_TIMESTAMP.get(buf);
+        let first_timestamp = FIRST_TIMESTAMP.get(buf).ok_or_else(||
+            Error::new(ErrorId::BadHeader, "first_timestamp is out of range"))?;
+        let max_timestamp = MAX_TIMESTAMP.get(buf).ok_or_else(||
+            Error::new(ErrorId::BadHeader, "max_timestamp is out of range"))?;
         if max_timestamp < first_timestamp {
             return Err(Error::new(ErrorId::BadHeader, "max_timestamp is before first_timestamp"));
         }
@@ -289,10 +291,10 @@ impl BufEntry {
                 let max_timestamp = self.max_timestamp + delta;
 
                 self.first_timestamp = first_timestamp;
-                format::FIRST_TIMESTAMP.set(buf, first_timestamp);
+                format::FIRST_TIMESTAMP.set(buf, Some(first_timestamp));
 
                 self.max_timestamp = max_timestamp;
-                format::MAX_TIMESTAMP.set(buf, max_timestamp);
+                format::MAX_TIMESTAMP.set(buf, Some(max_timestamp));
 
                 dirty = true;
             }
@@ -568,8 +570,8 @@ impl BufEntryBuilder {
         VERSION.write(wr, CURRENT_VERSION).unwrap();
         START_ID.write(wr, Some(id_range.0)).unwrap();
         END_ID_DELTA.write(wr, Self::id_delta(id_range)).unwrap();
-        FIRST_TIMESTAMP.write(wr, self.first_timestamp).unwrap();
-        MAX_TIMESTAMP.write(wr, self.max_timestamp).unwrap();
+        FIRST_TIMESTAMP.write(wr, Some(self.first_timestamp)).unwrap();
+        MAX_TIMESTAMP.write(wr, Some(self.max_timestamp)).unwrap();
         FLAGS.write(wr, self.flags).unwrap();
         TERM.write(wr, self.term).unwrap();
 
@@ -736,7 +738,7 @@ mod test {
                 ]).build();
 
                 let mismatching_timestamp = Timestamp::epoch().checked_add_millis(3).unwrap();
-                format::MAX_TIMESTAMP.set(&mut buf, mismatching_timestamp);
+                format::MAX_TIMESTAMP.set(&mut buf, Some(mismatching_timestamp));
                 BufEntryBuilder::set_header_crc(&mut buf);
 
                 let e = BufEntry::decode(&buf).unwrap().unwrap();

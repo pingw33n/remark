@@ -1,3 +1,6 @@
+use chrono::{DateTime, NaiveDateTime, Utc};
+use num_integer::Integer;
+use num_traits::cast::ToPrimitive;
 use std::fmt;
 use std::io::prelude::*;
 use std::num::NonZeroU64;
@@ -118,16 +121,24 @@ impl Timestamp {
         Self::from_duration_since_epoch(dur).unwrap()
     }
 
+    pub fn from_millis(millis: i64) -> Option<Self> {
+        if millis >= Self::min_value().0 && millis <= Self::max_value().0 {
+            Some(Self(millis))
+        } else {
+            None
+        }
+    }
+
     pub const fn epoch() -> Self {
         Self(0)
     }
 
-    pub fn min_value() -> Self {
-        Self(i64::min_value())
+    pub const fn min_value() -> Self {
+        Self(-62167219200000) // 0000-01-01T00:00:00.000Z
     }
 
-    pub fn max_value() -> Self {
-        Self(i64::max_value())
+    pub const fn max_value() -> Self {
+        Self(32503680000000) // 3000-01-01T00:00:00.000Z
     }
 
     pub fn millis(&self) -> i64 {
@@ -139,7 +150,7 @@ impl Timestamp {
     }
 
     pub fn checked_add_millis(&self, millis: i64) -> Option<Self> {
-        self.0.checked_add(millis).map(|v| v.into())
+        self.0.checked_add(millis).and_then(Self::from_millis)
     }
 
     pub fn checked_sub(&self, duration: Duration) -> Option<Self> {
@@ -147,15 +158,37 @@ impl Timestamp {
     }
 
     pub fn checked_sub_millis(&self, millis: i64) -> Option<Self> {
-        self.0.checked_sub(millis).map(|v| v.into())
+        self.0.checked_sub(millis).and_then(Self::from_millis)
     }
 
     pub fn checked_delta(&self, other: Self) -> Option<i64> {
-        self.millis().checked_sub(other.millis())
+        self.0.checked_sub(other.0)
+    }
+
+    pub fn duration_since(&self, other: Self) -> Option<Duration> {
+        if self.0 >= other.0 {
+            (self.0 as i128 - other.0 as i128).to_u64()
+                .map(Duration::from_millis)
+        } else {
+            None
+        }
+    }
+
+    pub fn to_date_time(&self) -> DateTime<Utc> {
+        let millis = (self.0 % 1000 + 1000) % 1000;
+        let secs = self.0.div_floor(&1000);
+        let ndt = NaiveDateTime::from_timestamp(secs, (millis * 1_000_000) as u32);
+        DateTime::from_utc(ndt, Utc)
     }
 
     fn from_duration_since_epoch(v: Duration) -> Option<Self> {
         Some(Self(v.as_millis_u64().and_then(|v| cast::i64(v).ok())?))
+    }
+}
+
+impl fmt::Display for Timestamp {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.to_date_time().format("%Y-%m-%dT%H:%M:%S%.3fZ"))
     }
 }
 
@@ -223,9 +256,9 @@ impl ops::SubAssign<Duration> for Timestamp {
     }
 }
 
-impl From<i64> for Timestamp {
-    fn from(v: i64) -> Self {
-        Self(v)
+impl Into<DateTime<Utc>> for Timestamp {
+    fn into(self) -> DateTime<Utc> {
+        self.to_date_time()
     }
 }
 
@@ -452,7 +485,7 @@ fn write_opt_bstring<T: AsRef<[u8]>>(wr: &mut impl Write, buf: Option<T>) -> Res
 mod test {
     use super::*;
 
-    mod message_id {
+    mod id {
         use super::*;
 
         #[test]
@@ -461,6 +494,24 @@ mod test {
             assert_eq!(Id::new(2).unwrap().checked_delta(Id::new(1).unwrap()), Some(1));
             assert_eq!(Id::min_value().checked_delta(Id::new(2).unwrap()), None);
             assert_eq!(Id::min_value().checked_delta(Id::max_value()), None);
+        }
+    }
+
+    mod timestamp {
+        use super::*;
+
+        #[test]
+        fn display() {
+            assert_eq!(Timestamp::epoch().to_string(), "1970-01-01T00:00:00.000Z".to_owned());
+            assert_eq!(Timestamp::from_millis(1549306753_123).unwrap().to_string(),
+                "2019-02-04T18:59:13.123Z".to_owned());
+            assert_eq!(Timestamp::from_millis(-1).unwrap().to_string(), "1969-12-31T23:59:59.999Z".to_owned());
+            assert_eq!(Timestamp::from_millis(-386380800_000).unwrap().to_string(),
+                "1957-10-04T00:00:00.000Z".to_owned());
+            assert_eq!(Timestamp::from_millis(-386380799_999).unwrap().to_string(),
+                "1957-10-04T00:00:00.001Z".to_owned());
+            assert_eq!(Timestamp::min_value().to_string(), "0000-01-01T00:00:00.000Z".to_owned());
+            assert_eq!(Timestamp::max_value().to_string(), "3000-01-01T00:00:00.000Z".to_owned());
         }
     }
 
