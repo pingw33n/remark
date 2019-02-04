@@ -2,7 +2,6 @@ pub(in crate) mod format;
 
 use byteorder::{BigEndian, ReadBytesExt};
 use if_chain::if_chain;
-use std::borrow::Cow;
 use std::io::SeekFrom;
 use std::io::prelude::*;
 
@@ -11,22 +10,22 @@ use crate::file::FileRead;
 use crate::bytes::*;
 use crate::message::{Id, Message, MessageBuilder, Timestamp};
 
-#[derive(Clone, Debug, Eq, Fail, PartialEq)]
-pub enum Error {
+#[derive(Clone, Copy, Debug, Eq, Fail, PartialEq)]
+pub enum ErrorId {
     #[fail(display = "{}", _0)]
     BadBody(BadBody),
 
-    #[fail(display = "{}", _0)]
-    BadFraming(Cow<'static, str>),
+    #[fail(display = "invalid entry framing")]
+    BadFraming,
 
-    #[fail(display = "{}", _0)]
-    BadHeader(Cow<'static, str>),
+    #[fail(display = "invalid entry header")]
+    BadHeader,
 
     #[fail(display = "{}", _0)]
     BadMessages(BadMessages),
 
-    #[fail(display = "{}", _0)]
-    BadVersion(Cow<'static, str>),
+    #[fail(display = "invalid entry version")]
+    BadVersion,
 
     #[fail(display = "message IDs must have no gaps")]
     DenseRequired,
@@ -38,13 +37,7 @@ pub enum Error {
     Io,
 }
 
-impl Error {
-    pub fn into_error(self) -> crate::error::Error {
-        self.into()
-    }
-}
-
-#[derive(Clone, Debug, Eq, Fail, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Fail, PartialEq)]
 pub enum BadBody {
     #[fail(display = "entry body CRC check failed")]
     BadCrc,
@@ -53,7 +46,7 @@ pub enum BadBody {
     TrailingGarbage,
 }
 
-#[derive(Clone, Debug, Eq, Fail, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Fail, PartialEq)]
 pub enum BadMessages {
     #[fail(display = "first message timestamp differs from the one in the entry header")]
     FirstTimestampMismatch,
@@ -103,7 +96,7 @@ impl BufEntry {
             return Ok(false);
         }
 
-        let len = cast::usize(rd.read_u32::<BigEndian>().context(Error::Io)?);
+        let len = cast::usize(rd.read_u32::<BigEndian>().wrap_err_id(ErrorId::Io)?);
         BufEntry::check_frame_len(len)?;
 
         if rd.available() < (len - format::FRAME_LEN.next) as u64 {
@@ -119,7 +112,7 @@ impl BufEntry {
         buf.set_len(read_len);
         format::FRAME_LEN.set(&mut buf[..], len as u32);
         rd.read_exact(&mut buf[format::FRAME_LEN.next..read_len])
-            .context(Error::Io)?;
+            .wrap_err_id(ErrorId::Io)?;
 
         Ok(true)
     }
@@ -153,29 +146,27 @@ impl BufEntry {
         let header_crc = HEADER_CRC.get(buf);
         let actual_header_crc = crc(&buf.as_slice()[format::HEADER_CRC_RANGE]);
         if header_crc != actual_header_crc {
-            return Err(Error::BadHeader("header CRC check failed".into()).into());
+            return Err(Error::new(ErrorId::BadHeader, "header CRC check failed"));
         }
 
         let version = VERSION.get(buf);
         if version != CURRENT_VERSION {
-            return Err(Error::BadVersion(format!(
-                "unsupported entry version: {}", version).into()).into());
+            return Err(Error::new(ErrorId::BadVersion, format!("{}", version)));
         }
         if buf.len() < FRAME_PROLOG_LEN {
             return Ok(None);
         }
 
         let start_id = START_ID.get(buf).ok_or_else(||
-            Error::BadHeader("invalid start_id (must not be 0)".into()).into_error())?;
+            Error::new(ErrorId::BadHeader, "start_id must not be 0"))?;
         let end_id_delta = END_ID_DELTA.get(buf);
         let end_id = start_id.checked_add(cast::u64(end_id_delta)).ok_or_else(||
-            Error::BadHeader("end_id overflows u64".into()).into_error())?;
+            Error::new(ErrorId::BadHeader, "end_id overflows u64"))?;
 
         let first_timestamp = FIRST_TIMESTAMP.get(buf);
         let max_timestamp = MAX_TIMESTAMP.get(buf);
         if max_timestamp < first_timestamp {
-            return Err(Error::BadHeader("max_timestamp is less than first_timestamp"
-                .into()).into());
+            return Err(Error::new(ErrorId::BadHeader, "max_timestamp is before first_timestamp"));
         }
 
         let flags = FLAGS.get(buf);
@@ -186,17 +177,15 @@ impl BufEntry {
 
         let id_count = cast::u64(end_id_delta) + 1;
         if cast::u64(message_count) > id_count  {
-            return Err(Error::BadHeader(format!(
+            return Err(Error::new(ErrorId::BadHeader, format!(
                 "(start_id, end_id) range is inconsistent with message_count: \
                 {} ID(s) in ({}, {}) range while message_count is {}",
-                id_count, start_id, end_id, message_count)
-                .into()).into());
+                id_count, start_id, end_id, message_count)));
         }
 
         if message_count <= 1 && (first_timestamp != max_timestamp) {
-            return Err(Error::BadHeader(
-                "first_timestamp must be the same as max_timestamp when message_count <= 1"
-                    .into()).into());
+            return Err(Error::new(ErrorId::BadHeader,
+                "first_timestamp must be the same as max_timestamp when message_count <= 1"));
         }
 
         Ok(Some(Self {
@@ -213,13 +202,6 @@ impl BufEntry {
         }))
     }
 
-//    pub fn complete_read(&self, rd: &mut impl FileRead, buf: &mut BytesMut) -> Result<()> {
-//        assert_eq!(buf.len(), format::FRAME_PROLOG_LEN);
-//        buf.set_len(self.frame_len);
-//        rd.read_exact(&mut buf[format::FRAME_PROLOG_LEN..]).context(Error::Io)?;
-//        Ok(())
-//    }
-
     pub fn iter<T: Buf>(&self, buf: T) -> BufEntryIter<Cursor<T>> {
         assert!(buf.len() >= self.frame_len);
         let mut rd = Cursor::new(buf);
@@ -234,12 +216,14 @@ impl BufEntry {
 
     fn check_frame_len(len: usize) -> Result<()> {
         if len < format::FRAME_PROLOG_FIXED_LEN {
-            return Err(Error::BadFraming(format!("frame len stored entry appears truncated ({} < {})",
-                len, format::FRAME_PROLOG_FIXED_LEN).into()).into());
+            return Err(Error::new(ErrorId::BadFraming, format!(
+                "frame len stored entry appears truncated ({} < {})",
+                len, format::FRAME_PROLOG_FIXED_LEN)));
         }
         if len > MAX_ENTRY_LEN {
-            return Err(Error::BadFraming(format!("stored entry len is too big ({} > {})",
-                len, MAX_ENTRY_LEN).into()).into());
+            return Err(Error::new(ErrorId::BadFraming, format!(
+                "stored entry len is too big ({} > {})",
+                len, MAX_ENTRY_LEN)));
         }
         Ok(())
     }
@@ -322,17 +306,17 @@ impl BufEntry {
         assert!(buf.len() >= self.frame_len, "invalid buf");
 
         if self.body_crc != crc(&buf.as_slice()[format::BODY_CRC_START..self.frame_len]) {
-            return Err(BadBody::BadCrc.into());
+            return Err(Error::without_details(BadBody::BadCrc));
         }
 
         if options.dense && cast::u64(self.message_count) !=
                 cast::u64(self.end_id_delta) + 1 {
-            return Err(Error::DenseRequired.into());
+            return Err(Error::without_details(ErrorId::DenseRequired));
         }
 
         if options.without_timestamp && (self.first_timestamp != Timestamp::epoch() ||
                 self.max_timestamp != Timestamp::epoch()) {
-            return Err(Error::WithoutTimestampRequired.into());
+            return Err(Error::without_details(ErrorId::WithoutTimestampRequired));
         }
 
         let buf = &buf.as_slice()[..self.frame_len];
@@ -344,15 +328,15 @@ impl BufEntry {
         for i in 0..self.message_count {
             // TODO implement more efficient reading of message specifically for validation.
             let msg = Message::read(&mut rd, next_id, next_timestamp)
-                .more_context("reading message for validation")?;
+                .context("reading message for validation")?;
             if i == 0 && msg.timestamp != self.first_timestamp {
-                return Err(BadMessages::FirstTimestampMismatch.into());
+                return Err(Error::without_details(BadMessages::FirstTimestampMismatch));
             }
             if options.dense && msg.id - next_id != 0 {
-                return Err(Error::DenseRequired.into());
+                return Err(Error::without_details(ErrorId::DenseRequired));
             }
             if options.without_timestamp && msg.timestamp != self.first_timestamp {
-                return Err(Error::WithoutTimestampRequired.into());
+                return Err(Error::without_details(ErrorId::WithoutTimestampRequired));
             }
             if max_timestamp.is_none() || msg.timestamp > max_timestamp.unwrap() {
                 max_timestamp = Some(msg.timestamp);
@@ -361,10 +345,10 @@ impl BufEntry {
             next_timestamp = msg.timestamp;
         }
         if max_timestamp.is_some() && max_timestamp.unwrap() != self.max_timestamp {
-            return Err(BadMessages::MaxTimestampMismatch.into());
+            return Err(Error::without_details(BadMessages::MaxTimestampMismatch));
         }
         if rd.available() > 0 {
-            return Err(BadBody::TrailingGarbage.into())
+            return Err(Error::without_details(BadBody::TrailingGarbage))
         }
         Ok(())
     }
@@ -390,7 +374,7 @@ impl<R: Read> Iterator for BufEntryIter<R> {
                 if self.left > 0 {
                     match msg.id.checked_add(1) {
                         Some(next_id) => self.next_id = next_id,
-                        None => return Some(Err(BadMessages::IdOverflow.into())),
+                        None => return Some(Err(Error::without_details(BadMessages::IdOverflow))),
                     }
                 }
                 self.next_timestamp = msg.timestamp;
@@ -636,8 +620,7 @@ fn crc(buf: &[u8]) -> u32 {
 #[cfg(test)]
 mod test {
     use super::*;
-    use super::Error;
-    use assert_matches::assert_matches;
+    use super::ErrorId;
 
     mod buf_entry_build {
         use super::*;
@@ -678,14 +661,14 @@ mod test {
             use super::*;
 
             fn val_err_opts(e: &BufEntry, buf: &impl Buf,
-                    dense: bool, without_timestamp: bool) -> ErrorKind {
+                    dense: bool, without_timestamp: bool) -> crate::error::ErrorId {
                 e.validate_body(buf, ValidBody {
                     dense,
                     without_timestamp,
-                }).err().unwrap().kind().clone()
+                }).err().unwrap().id().clone()
             }
 
-            fn val_err(e: &BufEntry, buf: &impl Buf) -> ErrorKind {
+            fn val_err(e: &BufEntry, buf: &impl Buf) -> crate::error::ErrorId {
                 val_err_opts(e, buf, false, false)
             }
 
@@ -696,8 +679,7 @@ mod test {
                 buf[format::BODY_CRC.pos] = !buf[format::BODY_CRC.pos];
                 let e = BufEntry::decode(&buf).unwrap().unwrap();
 
-                assert_matches!(val_err(&e, &buf),
-                        ErrorKind::Entry(Error::BadBody(BadBody::BadCrc)));
+                assert_eq!(val_err(&e, &buf), BadBody::BadCrc.into());
             }
 
             #[test]
@@ -709,8 +691,7 @@ mod test {
                     let i = if i < 0 { buf.len() as isize + i } else { i } as usize;
                     buf[i] = !buf[i];
 
-                    assert_matches!(val_err(&e, &buf),
-                        ErrorKind::Entry(Error::BadBody(BadBody::BadCrc)));
+                    assert_eq!(val_err(&e, &buf), BadBody::BadCrc.into());
                 }
             }
 
@@ -738,8 +719,7 @@ mod test {
                 BufEntryBuilder::set_body_crc(buf);
 
                 let e = BufEntry::decode(&buf).unwrap().unwrap();
-                assert_matches!(val_err(&e, &buf),
-                        ErrorKind::Entry(Error::BadMessages(BadMessages::FirstTimestampMismatch)));
+                assert_eq!(val_err(&e, &buf), BadMessages::FirstTimestampMismatch.into());
             }
 
             #[test]
@@ -760,8 +740,7 @@ mod test {
                 BufEntryBuilder::set_header_crc(&mut buf);
 
                 let e = BufEntry::decode(&buf).unwrap().unwrap();
-                assert_matches!(val_err(&e, &buf),
-                        ErrorKind::Entry(Error::BadMessages(BadMessages::MaxTimestampMismatch)));
+                assert_eq!(val_err(&e, &buf), BadMessages::MaxTimestampMismatch.into());
             }
 
             #[test]
@@ -777,8 +756,8 @@ mod test {
                     },
                 ]).build();
 
-                assert_matches!(val_err_opts(&e, &buf, false, true),
-                        ErrorKind::Entry(Error::WithoutTimestampRequired));
+                assert_eq!(val_err_opts(&e, &buf, false, true),
+                    ErrorId::WithoutTimestampRequired.into());
             }
 
             #[test]
@@ -790,8 +769,8 @@ mod test {
                     ..Default::default()
                 });
 
-                assert_matches!(val_err_opts(&e, &buf, false, true),
-                        ErrorKind::Entry(Error::WithoutTimestampRequired));
+                assert_eq!(val_err_opts(&e, &buf, false, true),
+                    ErrorId::WithoutTimestampRequired.into());
             }
 
             #[test]
@@ -804,8 +783,9 @@ mod test {
                         ..Default::default()
                     },
                 ]).build();
-                assert_matches!(val_err_opts(&e, &buf, true, false),
-                    ErrorKind::Entry(Error::DenseRequired));
+
+                assert_eq!(val_err_opts(&e, &buf, true, false),
+                    ErrorId::DenseRequired.into());
             }
 
             #[test]
@@ -814,8 +794,9 @@ mod test {
                 let mut b = BufEntryBuilder::sparse(Id::new(50).unwrap(), Id::new(100).unwrap());
                 b.message(MessageBuilder { id: Id::new(75), .. Default::default() });
                 let (e, buf) = b.build();
-                assert_matches!(val_err_opts(&e, &buf, true, false),
-                    ErrorKind::Entry(Error::DenseRequired));
+
+                assert_eq!(val_err_opts(&e, &buf, true, false),
+                    ErrorId::DenseRequired.into());
             }
         }
     }

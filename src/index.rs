@@ -3,7 +3,6 @@ use log::error;
 use matches::matches;
 use memmap::{MmapMut, MmapOptions};
 use parking_lot::Mutex;
-use std::borrow::Cow;
 use std::cmp::{self, Ord, Ordering};
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -16,10 +15,10 @@ use std::slice;
 use crate::error::*;
 use crate::message::Timestamp;
 
-#[derive(Clone, Debug, Eq, Fail, PartialEq)]
-pub enum Error {
-    #[fail(display = "{}", _0)]
-    Corrupted(Cow<'static, str>),
+#[derive(Clone, Copy, Debug, Eq, Fail, PartialEq)]
+pub enum ErrorId {
+    #[fail(display = "index corrupted")]
+    Corrupted,
 
     #[fail(display = "attempted to push index entries in wrong order")]
     PushMisordered,
@@ -143,7 +142,7 @@ impl<K: Field, V: Field> Inner<K, V> {
         if self.is_full() {
             let growable = self.growable_bytes();
             if growable == 0 {
-                return Err(Error::CantGrow.into());
+                return Err(Error::without_details(ErrorId::CantGrow));
             }
             let amount = cmp::min(self.preallocate_bytes, growable);
             let new_capacity = self.capacity_bytes + amount;
@@ -220,18 +219,18 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
                 .create_new(true);
         }
         let file = open_opts.open(&path)
-            .context(Error::Io)?;
+            .wrap_err_id(ErrorId::Io)?;
 
-        let file_len = file.metadata().context(Error::Io)?.len();
+        let file_len = file.metadata().wrap_err_id(ErrorId::Io)?.len();
         if file_len >= usize::max_value() as u64 {
-            return Err(Error::Corrupted("index file is too big to be mmaped".into()).into());
+            return Err(Error::new(ErrorId::Corrupted, "index file is too big to be mmaped"));
         }
 
         let file_len = file_len as usize;
         if file_len % Self::ENTRY_LEN != 0 {
-            return Err(Error::Corrupted(
-                format!("index file len ({}) is not a multiply of entry len ({})",
-                    file_len, Self::ENTRY_LEN).into()).into());
+            return Err(Error::new(ErrorId::Corrupted,format!(
+                "index file len ({}) is not a multiply of entry len ({})",
+                file_len, Self::ENTRY_LEN)));
         }
         let len_bytes = file_len;
 
@@ -251,7 +250,7 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
             (0, capacity_bytes)
         };
 
-        let mmap = Self::mmap(&file, max_capacity_bytes).context(Error::Io)?;
+        let mmap = Self::mmap(&file, max_capacity_bytes).wrap_err_id(ErrorId::Io)?;
 
         Ok(Self {
             path,
@@ -333,12 +332,12 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
     }
 
     pub fn flush(&self) -> Result<()> {
-        self.mmap.as_ref().unwrap().flush().context(Error::Io).map_err(|e| e.into())
+        self.mmap.as_ref().unwrap().flush().wrap_err_id(ErrorId::Io).map_err(|e| e.into())
     }
 
     pub fn shrink_to_fit(&self) -> Result<()> {
         if let Some(mmap) = self.mmap.as_ref() {
-            mmap.flush().context(Error::Io)?;
+            mmap.flush().wrap_err_id(ErrorId::Io)?;
         }
         let mut inner = self.inner.lock();
         set_file_len(&self.file, inner.len_bytes, true)?;
@@ -355,7 +354,7 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
                 MmapOptions::new()
                     .len(len)
                     .map_mut(&file)
-            }.context(Error::Io)?)
+            }.wrap_err_id(ErrorId::Io)?)
         })
     }
 
@@ -418,11 +417,11 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
 
     fn check_field<T: Field, DP: DupPolicy>(new: T, last: T) -> Result<()> {
         match new.cmp(&last) {
-            Ordering::Less => Err(Error::PushMisordered.into()),
+            Ordering::Less => Err(Error::without_details(ErrorId::PushMisordered)),
             Ordering::Equal => if DP::__DUP_ALLOWED {
                 Ok(())
             } else {
-                Err(Error::PushMisordered.into())
+                Err(Error::without_details(ErrorId::PushMisordered))
             }
             Ordering::Greater => Ok(()),
         }
@@ -453,15 +452,14 @@ impl<K: Field, V: Field, KP: DupPolicy> Drop for Index<K, V, KP> {
 fn set_file_len(file: &File, len: usize, committed: bool) -> Result<()> {
     // TODO this is not going to work on Windows: can't resize file while it's mmap'ed.
     file.set_len(len.checked_add(!committed as usize).unwrap() as u64)
-        .context(Error::Io)?;
+        .wrap_err_id(ErrorId::Io)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use super::Error;
-    use assert_matches::assert_matches;
+    use super::ErrorId;
     use std::fs;
     use std::sync::Arc;
     use std::time::Duration;
@@ -553,7 +551,7 @@ mod test {
             assert_eq!(f_len(), 5 * 12 + 1);
 
             for _ in 0..5 {
-                assert_eq!(idx.push(6, 106).unwrap_err().kind(), &ErrorKind::Index(Error::CantGrow));
+                assert_eq!(idx.push(6, 106).unwrap_err().id(), &ErrorId::CantGrow.into());
             }
 
             for k in 1..=5 {
@@ -570,13 +568,13 @@ mod test {
             }
 
             for _ in 0..5 {
-                assert_eq!(idx.push(6, 106).unwrap_err().kind(), &ErrorKind::Index(Error::CantGrow));
+                assert_eq!(idx.push(6, 106).unwrap_err().id(), &ErrorId::CantGrow.into());
             }
         }
     }
 
-    fn err_kind<T>(r: Result<T>) -> ErrorKind {
-        r.err().unwrap().kind().clone()
+    fn err_id<T>(r: Result<T>) -> crate::error::ErrorId {
+        r.err().unwrap().id().clone()
     }
 
     #[test]
@@ -588,12 +586,12 @@ mod test {
         }).unwrap();
         assert!(idx.push(100, 200).is_ok());
         assert!(idx.push(101, 201).is_ok());
-        assert_matches!(err_kind(idx.push(101, 201)), ErrorKind::Index(Error::PushMisordered));
-        assert_matches!(err_kind(idx.push(100, 200)), ErrorKind::Index(Error::PushMisordered));
-        assert_matches!(err_kind(idx.push(101, 200)), ErrorKind::Index(Error::PushMisordered));
-        assert_matches!(err_kind(idx.push(100, 201)), ErrorKind::Index(Error::PushMisordered));
-        assert_matches!(err_kind(idx.push(101, 202)), ErrorKind::Index(Error::PushMisordered));
-        assert_matches!(err_kind(idx.push(102, 201)), ErrorKind::Index(Error::PushMisordered));
+        assert_eq!(err_id(idx.push(101, 201)), ErrorId::PushMisordered.into());
+        assert_eq!(err_id(idx.push(100, 200)), ErrorId::PushMisordered.into());
+        assert_eq!(err_id(idx.push(101, 200)), ErrorId::PushMisordered.into());
+        assert_eq!(err_id(idx.push(100, 201)), ErrorId::PushMisordered.into());
+        assert_eq!(err_id(idx.push(101, 202)), ErrorId::PushMisordered.into());
+        assert_eq!(err_id(idx.push(102, 201)), ErrorId::PushMisordered.into());
         assert_eq!(idx.len(), 2);
         assert_eq!(idx.entry_by_key(100), Some((100, 200)));
         assert_eq!(idx.entry_by_key(101), Some((101, 201)));
@@ -609,10 +607,10 @@ mod test {
         assert!(idx.push(100, 200).is_ok());
         assert!(idx.push(101, 201).is_ok());
         assert!(idx.push(101, 202).is_ok());
-        assert_matches!(err_kind(idx.push(101, 201)), ErrorKind::Index(Error::PushMisordered));
-        assert_matches!(err_kind(idx.push(101, 200)), ErrorKind::Index(Error::PushMisordered));
-        assert_matches!(err_kind(idx.push(101, 199)), ErrorKind::Index(Error::PushMisordered));
-        assert_matches!(err_kind(idx.push(100, 203)), ErrorKind::Index(Error::PushMisordered));
+        assert_eq!(err_id(idx.push(101, 201)), ErrorId::PushMisordered.into());
+        assert_eq!(err_id(idx.push(101, 200)), ErrorId::PushMisordered.into());
+        assert_eq!(err_id(idx.push(101, 199)), ErrorId::PushMisordered.into());
+        assert_eq!(err_id(idx.push(100, 203)), ErrorId::PushMisordered.into());
         assert_eq!(idx.len(), 3);
     }
 

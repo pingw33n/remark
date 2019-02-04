@@ -1,5 +1,4 @@
 use itertools::Itertools;
-use std::borrow::Cow;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::collections::VecDeque;
@@ -14,19 +13,19 @@ use crate::util::file_mutex::FileMutex;
 
 const LOCK_FILE_NAME: &'static str = ".remark_lock";
 
-#[derive(Clone, Debug, Eq, Fail, PartialEq)]
-pub enum Error {
-    #[fail(display = "unknown files/directories found under a log directory: {}", _0)]
-    UnknownDirEntries(Cow<'static, str>),
+#[derive(Clone, Copy, Debug, Eq, Fail, PartialEq)]
+pub enum ErrorId {
+    #[fail(display = "unknown files/directories found under a log directory")]
+    UnknownDirEntries,
 
-    #[fail(display = "{}", _0)]
-    EntryTooBig(Cow<'static, str>),
+    #[fail(display = "can't push entry because it's too big")]
+    PushEntryTooBig,
 
-    #[fail(display = "couldn't lock log directory {:?}", _0)]
-    CantLockDir(PathBuf),
+    #[fail(display = "couldn't lock log directory")]
+    CantLockDir,
 
-    #[fail(display = "{}", _0)]
-    MaxTimestampNonMonotonic(Cow<'static, str>),
+    #[fail(display = "max. timestamp decreases between segments")]
+    MaxTimestampNonMonotonic,
 
     #[fail(display = "IO error")]
     Io,
@@ -87,20 +86,20 @@ impl Log {
 
         let exists = path.exists();
         if !exists {
-            fs::create_dir_all(&path).context(Error::Io)?;
+            fs::create_dir_all(&path).wrap_err_id(ErrorId::Io)?;
         }
 
         let _lock = FileMutex::try_lock(&path.join(LOCK_FILE_NAME))
-            .with_context(|_| Error::CantLockDir(path.clone()))?;
+            .wrap_err_with(|_| (ErrorId::CantLockDir, format!("{:?}", path)))?;
 
         let (mut segments, max_timestamp) = if exists {
             let mut segment_paths = Vec::new();
             let mut unknown = Vec::new();
-            for dir_entry in fs::read_dir(&path).context(Error::Io)? {
-                let dir_entry = dir_entry.context(Error::Io)?;
+            for dir_entry in fs::read_dir(&path).wrap_err_id(ErrorId::Io)? {
+                let dir_entry = dir_entry.wrap_err_id(ErrorId::Io)?;
                 let path = dir_entry.path();
                 let file_type = FileType::from_path(&path);
-                if !dir_entry.file_type().context(Error::Io)?.is_file() || file_type.is_none() {
+                if !dir_entry.file_type().wrap_err_id(ErrorId::Io)?.is_file() || file_type.is_none() {
                     unknown.push(path.clone());
                     if unknown.len() == UNKNOWN_DIR_ENTRIES_LIMIT + 1 {
                         break;
@@ -111,8 +110,7 @@ impl Log {
                     if unknown.len() > UNKNOWN_DIR_ENTRIES_LIMIT {
                         s += ", ..."
                     }
-                    return Err(Error::UnknownDirEntries(s.into())
-                        .into());
+                    return Err(Error::new(ErrorId::UnknownDirEntries, s));
                 }
                 if file_type.unwrap() == FileType::Data {
                     segment_paths.push(path.clone());
@@ -124,17 +122,16 @@ impl Log {
                 let segment = Segment::open(path, segment::Options {
                     read_only: true,
                     .. Default::default()
-                })
-                    .with_more_context(|_| format!("opening segment {:?}", path))?;
+                }).context_with(|_| format!("opening segment {:?}", path))?;
                 segments.push(segment);
             }
             segments.sort_by_key(|s| s.base_id());
 
             for (i, segment) in segments.iter().enumerate() {
                 if i > 0 && segment.max_timestamp() < segments[i - 1].max_timestamp() {
-                    return Err(Error::MaxTimestampNonMonotonic(format!(
-                        "max. timestamp descreases between segments: {:?} and {:?}",
-                        segments[i - 1].path(), segment.path()).into()).into());
+                    return Err(Error::new(ErrorId::MaxTimestampNonMonotonic, format!(
+                        "{:?} and {:?}",
+                        segments[i - 1].path(), segment.path())));
                 }
             }
             let max_timestamp = segments.last().map(|s| s.max_timestamp());
@@ -148,7 +145,7 @@ impl Log {
         if segments.is_empty() {
             segments.push_back(Segment::create_new(&path, Id::min_value(), max_timestamp,
                 Default::default())
-                .with_more_context(|_| format!("creating segment 0 in {:?}", path))?);
+                .context_with(|_| format!("creating first segment in {:?}", path))?);
         }
 
         Ok(Self {
@@ -163,10 +160,9 @@ impl Log {
     pub fn push(&mut self, entry: &mut BufEntry, buf: &mut BytesMut) -> Result<()> {
         let entry_len = cast::u32(buf.len()).unwrap();
         if entry_len > self.max_segment_len {
-            return Err(Error::EntryTooBig(format!(
-                "entry is bigger than the max segment len: {} > {}",
-                buf.len(), self.max_segment_len)
-                .into()).into());
+            return Err(Error::new(ErrorId::PushEntryTooBig, format!(
+                "{} > {}",
+                buf.len(), self.max_segment_len)));
         }
         if self.segments.back_mut().unwrap().len() + entry_len > self.max_segment_len {
             let base_id = self.segments.back_mut().unwrap().next_id();
@@ -181,16 +177,15 @@ impl Log {
 #[cfg(test)]
 mod test {
     use super::*;
-    use super::Error;
-    use assert_matches::assert_matches;
+    use super::ErrorId;
     use std::mem;
 
     #[test]
     fn lock() {
         let dir = mktemp::Temp::new_dir().unwrap();
         let log = Log::open_or_create(&dir, Default::default()).unwrap();
-        assert_matches!(Log::open_or_create(&dir, Default::default()).err().unwrap().kind(),
-            ErrorKind::Log(Error::CantLockDir(_)));
+        assert_eq!(Log::open_or_create(&dir, Default::default()).err().unwrap().id(),
+            &ErrorId::CantLockDir.into());
 
         mem::drop(log);
         Log::open_or_create(&dir, Default::default()).unwrap();

@@ -1,3 +1,4 @@
+#[allow(unused_macros)]
 macro_rules! clone {
     ($($n:ident),+ => move || $body:expr) => (
         {

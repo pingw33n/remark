@@ -1,7 +1,6 @@
 use if_chain::if_chain;
 use log::warn;
 use matches::matches;
-use std::borrow::Cow;
 use std::cmp;
 use std::io::prelude::*;
 use std::ops::{Bound, RangeBounds};
@@ -30,21 +29,21 @@ const MAX_INDEX_EACH_BYTES: u32 = HARD_MAX_SEGMENT_LEN;
 pub type IdIndex = Index<u32, u32>;
 pub type TimestampIndex = Index<Timestamp, u32, index::DupAllowed>;
 
-#[derive(Clone, Debug, Eq, Fail, PartialEq)]
-pub enum Error {
-    #[fail(display = "{}", _0)]
-    BadPath(Cow<'static, str>),
+#[derive(Clone, Copy, Debug, Eq, Fail, PartialEq)]
+pub enum ErrorId {
+    #[fail(display = "invalid segment path")]
+    BadPath,
 
-    #[fail(display = "error opening segment data file {:?}", _0)]
-    Open(PathBuf),
+    #[fail(display = "error opening segment data file")]
+    Open,
 
-    #[fail(display = "error creating new segment data file {:?}", _0)]
-    CreateNew(PathBuf),
+    #[fail(display = "error creating new segment data file")]
+    CreateNew,
 
-    #[fail(display = "{}", _0)]
-    SegmentTruncated(Cow<'static, str>),
+    #[fail(display = "segment unexpectedly truncated during iteration")]
+    SegmentTruncated,
 
-    #[fail(display = "fsync of segment file failed")]
+    #[fail(display = "fsync'ing of segment file failed")]
     Fsync,
 
     #[fail(display = "timestamp index is empty for existing segment")]
@@ -52,12 +51,6 @@ pub enum Error {
 
     #[fail(display = "IO error")]
     Io,
-}
-
-impl Error {
-    pub fn into_error(self) -> crate::error::Error {
-        self.into()
-    }
 }
 
 struct SegFile {
@@ -113,36 +106,32 @@ impl Segment {
         let path = path.as_ref();
 
         let dir = path.parent()
-            .ok_or_else(|| Error::BadPath(format!(
-                "couldn't get dir of {:?}", path).into()).into_error())?;
+            .ok_or_else(|| Error::new(ErrorId::BadPath, format!(
+                "couldn't get dir of {:?}", path)))?;
 
         let file_name = path.file_name()
-            .ok_or_else(|| Error::BadPath(format!(
-                "couldn't get segment filename from path {:?}",
-                path).into()).into_error())?
+            .ok_or_else(|| Error::new(ErrorId::BadPath, format!(
+                "couldn't get segment filename from {:?}", path)))?
             .to_str()
-            .ok_or_else(|| Error::BadPath(format!(
+            .ok_or_else(|| Error::new(ErrorId::BadPath, format!(
                 "segment file name {:?} contains non-unicode character",
-                path.file_name().unwrap())
-                .into()).into_error())?;
+                path.file_name().unwrap())))?;
         if !file_name.ends_with(DATA_FILE_SUFFIX) {
-            return Err(Error::BadPath(format!(
+            return Err(Error::new(ErrorId::BadPath, format!(
                 "segment data file name \"{}\" doesn't end with {}",
-                file_name, DATA_FILE_SUFFIX)
-                .into()).into());
+                file_name, DATA_FILE_SUFFIX)));
         }
         if file_name.len() != 20 + DATA_FILE_SUFFIX.len() {
-            return Err(Error::BadPath(format!(
+            return Err(Error::new(ErrorId::BadPath, format!(
                 "segment data file name \"{}\" doesn't specify base id",
-                file_name).into()).into());
+                file_name)));
         }
 
         let base_id = (&file_name[..20]).parse()
             .ok()
             .and_then(Id::new)
-            .ok_or_else(|| Error::BadPath(
-                format!("couldn't parse base id from filename \"{}\"", file_name)
-                    .into()).into_error())?;
+            .ok_or_else(|| Error::new(ErrorId::BadPath, format!(
+                "couldn't parse base id from filename \"{}\"", file_name)))?;
 
         Self::new(dir, base_id, Mode::Open, options)
     }
@@ -165,11 +154,11 @@ impl Segment {
         let file = OpenOptions::new()
             .create_new(create_new)
             .open(&path)
-            .with_context(|_| if create_new {
-                Error::CreateNew(path.clone())
+            .wrap_err_with(|_| (if create_new {
+                ErrorId::CreateNew
             } else {
-                Error::Open(path.clone())
-            })?;
+                ErrorId::Open
+            }, format!("{:?}", path)))?;
         let file = Arc::new(SegFile {
             path,
             file,
@@ -197,7 +186,7 @@ impl Segment {
             Index::create_new(&id_index_path, index_mode)
         } else {
             Index::open(&id_index_path, index_mode)
-        }.with_more_context(|_| format!("opening id index file {:?}", id_index_path))?;
+        }.context_with(|_| format!("opening id index file {:?}", id_index_path))?;
 
         let timestamp_index_path = base_path.join(format!("{}{}", base_name, TIMESTAMP_INDEX_FILE_SUFFIX));
         let timestamp_index = if create_new {
@@ -206,14 +195,14 @@ impl Segment {
             match Index::open(&timestamp_index_path, index_mode) {
                 Ok(idx) => {
                     if idx.is_empty() {
-                        Err(Error::TimestampIndexEmpty.into_error())
+                        Err(Error::without_details(ErrorId::TimestampIndexEmpty))
                     } else {
                         Ok(idx)
                     }
                 }
                 Err(e) => Err(e),
             }
-        }.with_more_context(|_| format!("opening timestamp index file {:?}", timestamp_index_path))?;
+        }.context_with(|_| format!("opening timestamp index file {:?}", timestamp_index_path))?;
 
         let next_id = {
             let id = Self::local_to_global_id0(base_id, id_index.last_key().unwrap_or(0));
@@ -228,9 +217,9 @@ impl Segment {
             if file_len > it.file_position() {
                 warn!("detected trailing garbage in segment {:?} length {}, truncating to {}",
                     file.path, file_len, it.file_position());
-                file.file.truncate(it.file_position()).context(Error::Io)
-                    .map_err(crate::error::Error::from)
-                    .with_more_context(|_| format!("while truncating file {:?}", file.path))?;
+                file.file.truncate(it.file_position())
+                    .wrap_err_id(ErrorId::Io)
+                    .context_with(|_| format!("while truncating file {:?}", file.path))?;
             }
 
             last_id.map(|v| v + 1).unwrap_or(base_id)
@@ -238,7 +227,7 @@ impl Segment {
 
         let max_timestamp = if let Mode::CreateNew { max_timestamp } = mode {
             timestamp_index.push(max_timestamp, 0)
-                .more_context("pushing checkpoint entry into timestamp index")?;
+                .context("pushing checkpoint entry into timestamp index")?;
             max_timestamp
         } else {
             let mut max_timestamp = Timestamp::min_value();
@@ -293,7 +282,7 @@ impl Segment {
         entry.validate_body(buf, ValidBody {
             without_timestamp: true,
             ..Default::default()
-        }).more_context("validating body")?;
+        }).context("validating body")?;
 
         entry.update(buf, Update {
             start_id: Some(self.next_id),
@@ -304,7 +293,7 @@ impl Segment {
 
         let pos = self.len();
 
-        self.file.file.writer().write_all(&buf[..]).context(Error::Io)?;
+        self.file.file.writer().write_all(&buf[..]).wrap_err_id(ErrorId::Io)?;
 
         if entry.max_timestamp() > self.max_timestamp {
             self.max_timestamp = entry.max_timestamp();
@@ -316,11 +305,11 @@ impl Segment {
         if self.bytes_since_last_index_push >= self.index_each_bytes {
             let local_start_id = self.global_to_local_id(entry.start_id());
             self.id_index.push(local_start_id, pos)
-                .more_context("pushing to id index")?;
+                .context("pushing to id index")?;
 
             let local_end_id = self.global_to_local_id(entry.end_id());
             self.timestamp_index.push(self.max_timestamp, local_end_id)
-                .more_context("pushing to timestamp index")?;
+                .context("pushing to timestamp index")?;
 
             self.bytes_since_last_index_push = 0;
         }
@@ -340,7 +329,7 @@ impl Segment {
     }
 
     pub fn force_fsync(&mut self) -> Result<()> {
-        self.file.file.sync_all().context(Error::Io)?;
+        self.file.file.sync_all().wrap_err_id(ErrorId::Io)?;
         self.bytes_sync_last_fsync = 0;
         Ok(())
     }
@@ -459,7 +448,7 @@ impl Iter {
         if let Some(frame_len) = self.frame_len {
             self.buf.set_len(frame_len);
             let r = self.rd.read_exact(&mut self.buf[format::FRAME_PROLOG_LEN..frame_len])
-                .context(Error::Io);
+                .wrap_err_id(ErrorId::Io);
             if r.is_ok() {
                 self.frame_len = None;
             }
@@ -484,10 +473,9 @@ impl Iterator for Iter {
         let file_len = self.rd.file().len();
         if let Some(last_file_len) = self.file_grow_check {
             if file_len < last_file_len {
-                return Some(Err(Error::SegmentTruncated(format!(
+                return Some(Err(Error::new(ErrorId::SegmentTruncated, format!(
                     "segment {:?} unexpectedly truncated while being iterated",
-                    self.rd.inner().path)
-                    .into()).into()));
+                    self.rd.inner().path))));
             }
             if file_len == last_file_len {
                 return None;
@@ -529,8 +517,7 @@ impl Iterator for Iter {
 #[cfg(test)]
 mod test {
     use super::*;
-    use super::Error;
-    use assert_matches::assert_matches;
+    use super::ErrorId;
     use std::fs;
     use crate::entry::{BufEntryBuilder, ValidBody};
     use crate::message::MessageBuilder;
@@ -664,8 +651,8 @@ mod test {
         let idx_path = dir.to_path_buf().join(format!("{:020}{}",
             base_id, TIMESTAMP_INDEX_FILE_SUFFIX));
         fs::OpenOptions::new().write(true).create(true).truncate(true).open(idx_path).unwrap();
-        assert_matches!(Segment::open(path, Default::default()).err().unwrap().kind(),
-            ErrorKind::Segment(Error::TimestampIndexEmpty));
+        assert_eq!(Segment::open(path, Default::default()).err().unwrap().id(),
+            &ErrorId::TimestampIndexEmpty.into());
     }
 
     #[test]

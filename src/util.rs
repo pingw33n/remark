@@ -1,4 +1,5 @@
 pub mod atomic;
+pub mod error;
 pub mod file_mutex;
 pub mod varint;
 
