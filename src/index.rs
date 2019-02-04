@@ -197,7 +197,7 @@ pub struct Index<K: Field, V: Field, KP: DupPolicy = DupNotAllowed> {
 }
 
 impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
-    const ENTRY_LEN: usize = K::LEN + V::LEN;
+    pub(in crate) const ENTRY_LEN: usize = K::LEN + V::LEN;
 
     pub fn open(path: impl AsRef<Path>, mode: Mode) -> Result<Self> {
         Self::new(path, mode, false)
@@ -335,14 +335,16 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
         self.mmap.as_ref().unwrap().flush().wrap_err_id(ErrorId::Io).map_err(|e| e.into())
     }
 
-    pub fn shrink_to_fit(&self) -> Result<()> {
-        if let Some(mmap) = self.mmap.as_ref() {
-            mmap.flush().wrap_err_id(ErrorId::Io)?;
-        }
-        let mut inner = self.inner.lock();
-        set_file_len(&self.file, inner.len_bytes, true)?;
-        inner.capacity_bytes = inner.len_bytes;
-        Ok(())
+    /// Similar to `compact()` but also shrinks `max_capacity` effectively making thins index
+    /// static (non-growable).
+    pub fn make_static(&self) -> Result<()> {
+        self.compact0(true)
+    }
+
+    /// Sets capacity to the amount this index actually uses. Doesn't change `max_capacity` so
+    /// it's still possible push entries afterwards unless `make_static()` was already called.
+    pub fn compact(&self) -> Result<()> {
+        self.compact0(false)
     }
 
     fn mmap(file: &File, len: usize) -> Result<Option<MmapMut>> {
@@ -439,11 +441,27 @@ impl<K: Field, V: Field, KP: DupPolicy> Index<K, V, KP> {
         };
         Some(Self::decode_entry(&buf[i..]))
     }
+
+    fn compact0(&self, committed: bool) -> Result<()> {
+        if let Some(mmap) = self.mmap.as_ref() {
+            mmap.flush().wrap_err_id(ErrorId::Io)?;
+        }
+        let mut inner = self.inner.lock();
+        if !committed && inner.capacity_bytes <= inner.len_bytes {
+            return Ok(());
+        }
+        set_file_len(&self.file, inner.len_bytes, committed)?;
+        inner.capacity_bytes = inner.len_bytes;
+        if committed {
+            inner.max_capacity_bytes = inner.len_bytes;
+        }
+        Ok(())
+    }
 }
 
 impl<K: Field, V: Field, KP: DupPolicy> Drop for Index<K, V, KP> {
     fn drop(&mut self) {
-        let _ = self.shrink_to_fit()
+        let _ = self.make_static()
             .map_err(|e| error!("[{:?}] error compacting index: {:?}",
                 self.path, e));
     }
@@ -496,7 +514,7 @@ mod test {
                             assert_eq!(idx.entry_by_value(v), Some((k, v)));
 
                             if thread_rng().gen_range(0, 100) < 10 {
-                                idx.shrink_to_fit().unwrap();
+                                idx.compact().unwrap();
                             }
                         }
                     }
