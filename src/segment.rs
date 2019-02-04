@@ -260,7 +260,7 @@ impl Segment {
         &self.file.path
     }
 
-    pub fn len(&self) -> u32 {
+    pub fn len_bytes(&self) -> u32 {
         cast::u32(self.file.file.len()).unwrap()
     }
 
@@ -291,7 +291,7 @@ impl Segment {
 
         self.next_id = entry.end_id() + 1;
 
-        let pos = self.len();
+        let pos = self.len_bytes();
 
         self.file.file.writer().write_all(&buf[..]).wrap_err_id(ErrorId::Io)?;
 
@@ -635,7 +635,7 @@ mod test {
             b.message(Default::default());
         }
         let (mut entry, mut buf) = b.build();
-        let pos = seg.len();
+        let pos = seg.len_bytes();
         seg.push(&mut entry, &mut buf).unwrap();
         assert_eq!(seg.id_index.entry_by_key(1), Some((1, pos)));
     }
@@ -663,7 +663,7 @@ mod test {
                 Default::default()).unwrap();
             let (mut entry, mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
             seg.push(&mut entry, &mut buf).unwrap();
-            (seg.path().clone(), seg.len())
+            (seg.path().clone(), seg.len_bytes())
         };
 
         fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&[42]).unwrap();
@@ -671,7 +671,7 @@ mod test {
 
         let mut seg = Segment::open(&path, Default::default()).unwrap();
         seg.force_fsync().unwrap();
-        assert_eq!(seg.len(), expected_len);
+        assert_eq!(seg.len_bytes(), expected_len);
         assert_eq!(fs::metadata(&path).unwrap().len(), expected_len as u64);
     }
 }

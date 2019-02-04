@@ -164,7 +164,7 @@ impl Log {
                 "{} > {}",
                 buf.len(), self.max_segment_len)));
         }
-        if self.segments.back_mut().unwrap().len() + entry_len > self.max_segment_len {
+        if self.segments.back_mut().unwrap().len_bytes() + entry_len > self.max_segment_len {
             let base_id = self.segments.back_mut().unwrap().next_id();
             self.segments.push_back(Segment::create_new(&self.path, base_id,
                 self.max_timestamp, Default::default())?);
