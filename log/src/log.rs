@@ -1,7 +1,10 @@
 use itertools::Itertools;
+use log::info;
+use num_traits::cast::ToPrimitive;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use crate::bytes::*;
 use crate::entry::BufEntry;
@@ -164,18 +167,50 @@ impl Log {
                 "{} > {}",
                 buf.len(), self.max_segment_len)));
         }
-        if self.segments.back_mut().unwrap().len_bytes() + entry_len > self.max_segment_len {
-            let base_id = {
-                let cur_seg = self.segments.back_mut().unwrap();
-                cur_seg.make_read_only()
-                    .context_with(|_| format!("making segment {:?} read-only", cur_seg.path()))?;
-                cur_seg.next_id()
-            };
-            self.segments.push_back(Segment::create_new(&self.path, base_id,
-                self.max_timestamp, Default::default())?);
-        }
+
+        self.roll_over_if_max_len(entry_len)?;
 
         self.segments.back_mut().unwrap().push(entry, buf)
+    }
+
+    pub fn roll_over_if_idle(&mut self, max_idle: Duration, now: Timestamp) -> Result<bool> {
+        let (empty, max_timestamp) = {
+            let seg = self.segments.back().unwrap();
+            (seg.is_empty(), seg.max_timestamp())
+        };
+        if empty {
+            return Ok(false);
+        }
+        if let Some(dur) = now.duration_since(max_timestamp) {
+            if dur > max_idle {
+                info!("rolling over segment based on max. idle time: max_idle={} now={} path={:?}",
+                    humantime::format_duration(max_idle), now, self.path);
+                self.roll_over()?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn roll_over_if_max_len(&mut self, new_entry_len: u32) -> Result<()> {
+        if self.segments.back().unwrap().len_bytes() + new_entry_len > self.max_segment_len {
+            info!("rolling over segment based on max. length {}: {:?}",
+                self.max_segment_len, self.path);
+            self.roll_over()?;
+        }
+        Ok(())
+    }
+
+    fn roll_over(&mut self) -> Result<()> {
+        let base_id = {
+            let cur_seg = self.segments.back_mut().unwrap();
+            cur_seg.make_read_only()
+                .context_with(|_| format!("making segment {:?} read-only", cur_seg.path()))?;
+            cur_seg.next_id()
+        };
+        self.segments.push_back(Segment::create_new(&self.path, base_id,
+            self.max_timestamp, Default::default())?);
+        Ok(())
     }
 }
 
@@ -184,6 +219,8 @@ mod test {
     use super::*;
     use super::ErrorId;
     use std::mem;
+    use crate::entry::BufEntryBuilder;
+    use crate::message::MessageBuilder;
 
     #[test]
     fn lock() {
@@ -194,5 +231,45 @@ mod test {
 
         mem::drop(log);
         Log::open_or_create(&dir, Default::default()).unwrap();
+    }
+
+    #[test]
+    fn roll_over_on_len() {
+        let dir = mktemp::Temp::new_dir().unwrap();
+
+        let (ref mut e, ref mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
+
+        let mut log = Log::open_or_create(&dir, Options {
+            max_segment_len: buf.len().to_u32().unwrap(),
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(log.segments.len(), 1);
+
+        log.push(e, buf).unwrap();
+        assert_eq!(log.segments.len(), 1);
+
+        let (ref mut e, ref mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
+        log.push(e, buf).unwrap();
+        assert_eq!(log.segments.len(), 2);
+        assert_eq!(log.segments[0].len_bytes(), buf.len().to_u32().unwrap());
+        assert_eq!(log.segments[1].len_bytes(), buf.len().to_u32().unwrap());
+    }
+
+    #[test]
+    fn roll_over_on_idle() {
+        let dir = mktemp::Temp::new_dir().unwrap();
+        let mut log = Log::open_or_create(&dir, Default::default()).unwrap();
+
+        // Don't roll over empty.
+        assert!(!log.roll_over_if_idle(Duration::from_millis(0), Timestamp::max_value()).unwrap());
+        assert_eq!(log.segments.len(), 1);
+
+        let (ref mut e, ref mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
+        log.push(e, buf).unwrap();
+        assert_eq!(log.segments.len(), 1);
+        assert!(log.roll_over_if_idle(Duration::from_millis(0), e.max_timestamp() + 1).unwrap());
+        assert_eq!(log.segments.len(), 2);
+        assert_eq!(log.segments[0].len_bytes(), buf.len().to_u32().unwrap());
+        assert_eq!(log.segments[1].len_bytes(), 0);
     }
 }

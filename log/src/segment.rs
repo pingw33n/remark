@@ -1,5 +1,5 @@
 use if_chain::if_chain;
-use log::warn;
+use log::{debug, warn};
 use matches::matches;
 use std::cmp;
 use std::io::prelude::*;
@@ -342,20 +342,27 @@ impl Segment {
     }
 
     pub fn force_fsync(&mut self) -> Result<()> {
+        debug!("fsyncing: bytes_sync_last_fsync={} path={:?}",
+            self.bytes_sync_last_fsync, self.path());
         self.file.file.sync_all().wrap_err_id(ErrorId::Io)?;
         self.bytes_sync_last_fsync = 0;
         Ok(())
     }
 
     pub fn make_read_only(&mut self) -> Result<()> {
+        debug!("making segment read-only: {:?}", self.path());
         if_chain! {
             if let Some(last_pos) = self.last_pos;
             if last_pos > 0;
             let last_lid = self.global_to_local_id(self.next_id - 1);
             if self.id_index.last_key().map(|v| v < last_lid).unwrap_or(true);
             then {
+                debug!("pushing final id checkpoint: ({}, {})", last_lid, last_pos);
                 self.id_index.push(last_lid, last_pos)
-                    .context("pushing to id index (final checkpoint)")?;
+                    .context("pushing final checkpoint to id index")?;
+
+                debug!("pushing final timestamp checkpoint: ({}, {})", self.max_timestamp,
+                    last_lid + 1);
                 self.timestamp_index.push(self.max_timestamp, last_lid + 1)
                     .context("pushing to timestamp index (final checkpoint)")?;
             }
