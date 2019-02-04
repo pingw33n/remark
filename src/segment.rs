@@ -604,10 +604,11 @@ mod test {
                 },
             ]).build();
             seg.push(&mut entry, &mut buf).unwrap();
+            let timestamp = entry.first_timestamp();
             assert_eq!(entry.start_id(), Id::new(102).unwrap());
             assert_eq!(entry.end_id(), Id::new(102).unwrap());
-            assert_eq!(act_entry.first_timestamp(), timestamp);
-            assert_eq!(act_entry.max_timestamp(), timestamp);
+            assert_eq!(entry.first_timestamp(), timestamp);
+            assert_eq!(entry.max_timestamp(), timestamp);
 
             assert_eq!(seg.max_timestamp(), timestamp);
         }
