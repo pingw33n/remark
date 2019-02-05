@@ -191,5 +191,9 @@ impl FieldType for Option<Timestamp> {
 }
 
 pub fn checksum(buf: &[u8]) -> u32 {
-    crc::crc32::checksum_castagnoli(buf)
+    use std::hash::Hasher;
+
+    let mut h = twox_hash::XxHash::with_seed(0);
+    h.write(buf);
+    h.finish() as u32
 }
