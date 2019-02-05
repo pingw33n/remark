@@ -2,13 +2,18 @@ pub(in crate) mod format;
 
 use byteorder::{BigEndian, ReadBytesExt};
 use if_chain::if_chain;
-use std::io::SeekFrom;
+use matches::matches;
+use num_traits::cast::FromPrimitive;
 use std::io::prelude::*;
+use std::mem;
 
+pub use crate::util::compress::Codec;
+
+use crate::bytes::*;
 use crate::error::*;
 use crate::file::FileRead;
-use crate::bytes::*;
 use crate::message::{Id, Message, MessageBuilder, Timestamp};
+use crate::util::compress::*;
 
 #[derive(Clone, Copy, Debug, Eq, Fail, PartialEq)]
 pub enum ErrorId {
@@ -26,6 +31,9 @@ pub enum ErrorId {
 
     #[fail(display = "invalid entry version")]
     BadVersion,
+
+    #[fail(display = "unknown compression codec")]
+    BadCompression,
 
     #[fail(display = "message IDs must have no gaps")]
     DenseRequired,
@@ -81,7 +89,7 @@ pub struct BufEntry {
     end_id_delta: u32,
     first_timestamp: Timestamp,
     max_timestamp: Timestamp,
-    flags: u16,
+    compression: Codec,
     term: u64,
     body_checksum: u32,
     message_count: u32,
@@ -172,6 +180,10 @@ impl BufEntry {
         }
 
         let flags = FLAGS.get(buf);
+        let compress_num = flags & 0b111;
+        let compression = Codec::from_u16(compress_num).ok_or_else(||
+            Error::new(ErrorId::BadCompression, compress_num.to_string()))?;
+
         let term = TERM.get(buf);
         let message_count = MESSAGE_COUNT.get(buf);
 
@@ -197,7 +209,7 @@ impl BufEntry {
             end_id_delta,
             first_timestamp,
             max_timestamp,
-            flags,
+            compression,
             term,
             body_checksum,
             message_count,
@@ -212,7 +224,7 @@ impl BufEntry {
             next_id: self.start_id,
             next_timestamp: self.first_timestamp,
             left: self.message_count,
-            rd,
+            rd: ReadState::Init { rd, compression: self.compression },
         }
     }
 
@@ -254,8 +266,8 @@ impl BufEntry {
         self.max_timestamp
     }
 
-    pub fn flags(&self) -> u16 {
-        self.flags
+    pub fn compression(&self) -> Codec {
+        self.compression
     }
 
     pub fn term(&self) -> u64 {
@@ -357,21 +369,43 @@ impl BufEntry {
     }
 }
 
-pub struct BufEntryIter<R> {
+enum ReadState<R: BufRead> {
+    Init { rd: R, compression: Codec },
+    Initing,
+    Decoder(Decoder<R>),
+}
+
+pub struct BufEntryIter<R: BufRead> {
     next_id: Id,
     next_timestamp: Timestamp,
     left: u32,
-    rd: R,
+    rd: ReadState<R>,
 }
 
-impl<R: Read> Iterator for BufEntryIter<R> {
+impl<R: BufRead> Iterator for BufEntryIter<R> {
     type Item = Result<Message>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.left == 0 {
             return None;
         }
-        Some(match Message::read(&mut self.rd, self.next_id, self.next_timestamp) {
+        if matches!(self.rd, ReadState::Init {..}) {
+            if let ReadState::Init { rd, compression } = mem::replace(&mut self.rd, ReadState::Initing) {
+                let rd = Decoder::new(rd, compression);
+                if rd.is_err() {
+                    return Some(rd.map(|_| unreachable!()).wrap_err_id(ErrorId::Io));
+                }
+                self.rd = ReadState::Decoder(rd.unwrap());
+            } else {
+                unreachable!()
+            }
+        }
+        let rd = if let ReadState::Decoder(rd) = &mut self.rd {
+            rd
+        } else {
+            unreachable!()
+        };
+        Some(match Message::read(rd, self.next_id, self.next_timestamp) {
             Ok(msg) => {
                 self.left -= 1;
                 if self.left > 0 {
@@ -389,14 +423,14 @@ impl<R: Read> Iterator for BufEntryIter<R> {
 }
 
 pub struct BufEntryBuilder {
-    buf: BytesMut,
+    compression: Codec,
+    encoder: Option<Encoder<Cursor<BytesMut>>>,
     start_id: Option<Id>,
     end_id: Option<Id>,
     next_id: Id,
     first_timestamp: Timestamp,
     max_timestamp: Timestamp,
     next_timestamp: Timestamp,
-    flags: u16,
     term: u64,
     message_count: u32,
 }
@@ -415,21 +449,29 @@ impl BufEntryBuilder {
             start_id.unwrap() <= end_id.unwrap());
         let next_id = start_id.unwrap_or(Id::min_value());
         Self {
-            buf: BytesMut::new(),
+            compression: Codec::Uncompressed,
+            encoder: None,
             start_id,
             end_id,
             next_id,
             first_timestamp: Timestamp::epoch(),
             max_timestamp: Timestamp::epoch(),
             next_timestamp: Timestamp::epoch(),
-            flags: 0,
             term: 0,
             message_count: 0,
         }
     }
 
-    pub fn get_encoded_len(&self) -> usize {
-        self.buf.len()
+    pub fn compression(&mut self, codec: Codec) -> &mut Self {
+        assert!(self.encoder.is_none(),
+            "can't change compression codec after some messages have been already written");
+        self.compression = codec;
+        self
+    }
+
+    pub fn get_frame_len(&self) -> usize {
+        self.encoder.as_ref().map(|enc| enc.get_ref().get_ref().len())
+            .unwrap_or(format::FRAME_PROLOG_LEN)
     }
 
     pub fn get_id_range(&self) -> Option<(Id, Id)> {
@@ -448,10 +490,6 @@ impl BufEntryBuilder {
         } else {
             None
         }
-    }
-
-    pub fn get_flags(&self) -> u16 {
-        self.flags
     }
 
     pub fn get_term(&self) -> u64 {
@@ -505,23 +543,26 @@ impl BufEntryBuilder {
 
         let msg_wr = msg.writer(expected_next_id, expected_next_timestamp);
 
-        if self.buf.capacity() == 0 {
-            let len = format::FRAME_PROLOG_LEN + msg_wr.encoded_len();
-            self.buf.ensure_capacity(len);
-            self.buf.ensure_len(format::FRAME_PROLOG_LEN);
-        } else {
-            self.buf.reserve(msg_wr.encoded_len());
+        if self.encoder.is_none() {
+            let estimated_len = format::FRAME_PROLOG_LEN + msg_wr.encoded_len();
+            let mut buf = BytesMut::new();
+            buf.ensure_capacity(estimated_len);
+            buf.ensure_len(format::FRAME_PROLOG_LEN);
+
+            let mut cursor = Cursor::new(buf);
+            cursor.set_position(format::MESSAGES_START);
+            self.encoder = Some(Encoder::new(cursor, self.compression)
+                .expect("couldn't create encoder")); // TODO when can this happen?
         }
 
-        let ref mut wr = Cursor::new(&mut self.buf);
-        wr.seek(SeekFrom::End(0)).unwrap();
-        msg_wr.write(wr).unwrap();
+        msg_wr.write(self.encoder.as_mut().unwrap())
+            .expect("error writing message into encoder"); // TODO when can this happen?
 
         self
     }
 
-    pub fn messages(&mut self, vec: &mut Vec<MessageBuilder>) -> &mut Self {
-        for m in vec.drain(..) {
+    pub fn messages(&mut self, iter: impl IntoIterator<Item=MessageBuilder>) -> &mut Self {
+        for m in iter {
             self.message(m);
         }
 
@@ -534,8 +575,12 @@ impl BufEntryBuilder {
 
     pub fn build(mut self) -> (BufEntry, BytesMut) {
         let id_range = self.get_id_range().expect("can't build dense entry without messages");
-        let (header_checksum, body_checksum) = self.write_prolog(id_range);
-        let frame_len = self.get_encoded_len();
+        let mut buf = self.encoder.take().map(|e| e.finish()
+            .expect("error finishing encoder")
+            .into_inner())
+            .unwrap_or_else(|| BytesMut::new());
+        let (header_checksum, body_checksum) = self.fill_prolog(&mut buf, id_range);
+        let frame_len = buf.len();
         (BufEntry {
             frame_len,
             header_checksum,
@@ -543,11 +588,11 @@ impl BufEntryBuilder {
             end_id_delta: Self::id_delta(id_range),
             first_timestamp: self.first_timestamp,
             max_timestamp: self.max_timestamp,
-            flags: self.flags,
+            compression: self.compression,
             term: self.term,
             body_checksum,
             message_count: self.message_count,
-        }, self.buf)
+        }, buf)
     }
 
     fn end_id_from_next(next_id: Id) -> Option<Id> {
@@ -555,30 +600,25 @@ impl BufEntryBuilder {
     }
 
     /// Returns (header_checksum, body_checksum).
-    fn write_prolog(&mut self, id_range: (Id, Id)) -> (u32, u32) {
+    fn fill_prolog(&self, buf: &mut BytesMut, id_range: (Id, Id)) -> (u32, u32) {
         use format::*;
 
-        self.buf.ensure_len(format::FRAME_PROLOG_LEN);
+        buf.ensure_len(format::FRAME_PROLOG_LEN);
 
-        let ref mut wr = Cursor::new(&mut self.buf);
+        let len = cast::u32(buf.len()).unwrap();
+        FRAME_LEN.set(buf, len);
 
-        let len = cast::u32(wr.get_ref().len()).unwrap();
-        FRAME_LEN.write(wr, len).unwrap();
+        VERSION.set(buf, CURRENT_VERSION);
+        START_ID.set(buf, Some(id_range.0));
+        END_ID_DELTA.set(buf, Self::id_delta(id_range));
+        FIRST_TIMESTAMP.set(buf, Some(self.first_timestamp));
+        MAX_TIMESTAMP.set(buf, Some(self.max_timestamp));
+        FLAGS.set(buf, self.compression as u16);
+        TERM.set(buf, self.term);
+        MESSAGE_COUNT.set(buf, self.message_count);
 
-        // skip header checksum
-        wr.set_position(format::HEADER_CHECKSUM.next);
-
-        VERSION.write(wr, CURRENT_VERSION).unwrap();
-        START_ID.write(wr, Some(id_range.0)).unwrap();
-        END_ID_DELTA.write(wr, Self::id_delta(id_range)).unwrap();
-        FIRST_TIMESTAMP.write(wr, Some(self.first_timestamp)).unwrap();
-        MAX_TIMESTAMP.write(wr, Some(self.max_timestamp)).unwrap();
-        FLAGS.write(wr, self.flags).unwrap();
-        TERM.write(wr, self.term).unwrap();
-        MESSAGE_COUNT.write(wr, self.message_count).unwrap();
-
-        let header_checksum = Self::set_header_checksum(wr.get_mut());
-        let body_checksum = Self::set_body_checksum(wr.get_mut());
+        let header_checksum = Self::set_header_checksum(buf.as_mut_slice());
+        let body_checksum = Self::set_body_checksum(buf.as_mut_slice());
 
         (header_checksum, body_checksum)
     }
@@ -599,7 +639,7 @@ impl BufEntryBuilder {
 impl From<Vec<MessageBuilder>> for BufEntryBuilder {
     fn from(mut v: Vec<MessageBuilder>) -> Self {
         let mut b = BufEntryBuilder::dense();
-        b.messages(&mut v);
+        b.messages(v.drain(..));
         b
     }
 }
@@ -617,7 +657,7 @@ mod test {
     use super::*;
     use super::ErrorId;
 
-    mod buf_entry_build {
+    mod buf_entry_builder {
         use super::*;
 
         #[test]
@@ -646,6 +686,42 @@ mod test {
 
             let act_ts: Vec<_> = e.iter(&buf).map(|v| v.unwrap().timestamp).collect();
             assert_eq!(&act_ts, ts);
+        }
+
+        #[test]
+        fn compression() {
+            let msgs_b: Vec<_> = (1..100)
+                .map(|i| MessageBuilder {
+                    id: Some(Id::new(i).unwrap()),
+                    timestamp: Some(Timestamp::now()),
+                    key: Some("key1".into()),
+                    value: Some("value1".into()),
+                    ..Default::default()
+                })
+                .collect();
+            let msgs: Vec<_> = msgs_b.iter().map(|v| v.clone().build()).collect();
+
+            let build = |codec| {
+                let mut b = BufEntryBuilder::dense();
+                b.compression(codec)
+                    .messages(msgs_b.clone());
+                b.build()
+            };
+
+            let all = &[Codec::Uncompressed, Codec::Lz4, Codec::Zstd];
+            let encoded: Vec<_> = all.iter().map(|&c| (c, build(c))).collect();
+
+            let uncompressed_len = (encoded[0].1).1.len();
+
+            for (codec, (entry, buf)) in encoded {
+                assert_eq!(entry.compression(), codec);
+                if codec != Codec::Uncompressed {
+                    assert!(buf.len() < uncompressed_len);
+                }
+
+                let actual: Vec<_> = entry.iter(&buf).map(|v| v.unwrap()).collect();
+                assert_eq!(actual, msgs);
+            }
         }
     }
 

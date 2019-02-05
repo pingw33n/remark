@@ -262,7 +262,7 @@ impl Into<DateTime<Utc>> for Timestamp {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct MessageBuilder {
     pub id: Option<Id>,
     pub timestamp: Option<Timestamp>,

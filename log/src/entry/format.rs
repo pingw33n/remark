@@ -1,6 +1,4 @@
-use byteorder::{BigEndian, ByteOrder, WriteBytesExt};
-use std::io;
-use std::io::prelude::*;
+use byteorder::{BigEndian, ByteOrder};
 use std::ops::Range;
 use std::marker::PhantomData;
 
@@ -77,10 +75,6 @@ impl<F: FieldType> Field<F> {
     pub fn set(&self, buf: &mut [u8], v: F) {
         v.set(&mut buf[self.pos..])
     }
-
-    pub fn write(&self, wr: &mut Write, v: F) -> io::Result<()> {
-        v.write(wr)
-    }
 }
 
 pub trait FieldType: Sized {
@@ -88,7 +82,6 @@ pub trait FieldType: Sized {
 
     fn get(buf: &impl Buf, i: usize) -> Self;
     fn set(&self, buf: &mut [u8]);
-    fn write(&self, wr: &mut Write) -> io::Result<()>;
 }
 
 impl FieldType for u8 {
@@ -98,10 +91,6 @@ impl FieldType for u8 {
 
     fn set(&self, buf: &mut [u8]) {
         buf[0] = *self;
-    }
-
-    fn write(&self, wr: &mut Write) -> io::Result<()> {
-        wr.write_u8(*self)
     }
 }
 
@@ -113,10 +102,6 @@ impl FieldType for u16 {
     fn set(&self, buf: &mut [u8]) {
         BigEndian::write_u16(buf, *self);
     }
-
-    fn write(&self, wr: &mut Write) -> io::Result<()> {
-        wr.write_u16::<BigEndian>(*self)
-    }
 }
 
 impl FieldType for u32 {
@@ -126,10 +111,6 @@ impl FieldType for u32 {
 
     fn set(&self, buf: &mut [u8]) {
         BigEndian::write_u32(buf, *self);
-    }
-
-    fn write(&self, wr: &mut Write) -> io::Result<()> {
-        wr.write_u32::<BigEndian>(*self)
     }
 }
 
@@ -141,10 +122,6 @@ impl FieldType for u64 {
     fn set(&self, buf: &mut [u8]) {
         BigEndian::write_u64(buf, *self);
     }
-
-    fn write(&self, wr: &mut Write) -> io::Result<()> {
-        wr.write_u64::<BigEndian>(*self)
-    }
 }
 
 impl FieldType for i64 {
@@ -155,10 +132,6 @@ impl FieldType for i64 {
     fn set(&self, buf: &mut [u8]) {
         BigEndian::write_i64(buf, *self);
     }
-
-    fn write(&self, wr: &mut Write) -> io::Result<()> {
-        wr.write_i64::<BigEndian>(*self)
-    }
 }
 
 impl FieldType for Option<Id> {
@@ -168,10 +141,6 @@ impl FieldType for Option<Id> {
 
     fn set(&self, buf: &mut [u8]) {
         self.map(|v| v.as_u64()).unwrap_or(0).set(buf);
-    }
-
-    fn write(&self, wr: &mut Write) -> io::Result<()> {
-        self.map(|v| v.as_u64()).unwrap_or(0).write(wr)
     }
 }
 
@@ -184,10 +153,6 @@ impl FieldType for Option<Timestamp> {
 
     fn set(&self, buf: &mut [u8]) {
         self.unwrap().millis().set(buf);
-    }
-
-    fn write(&self, wr: &mut Write) -> io::Result<()> {
-        self.unwrap().millis().write(wr)
     }
 }
 

@@ -13,4 +13,4 @@ pub mod index;
 pub mod log;
 pub mod message;
 pub mod segment;
-pub mod util;
+mod util;

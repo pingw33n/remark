@@ -684,7 +684,7 @@ mod test {
         assert_eq!(seg.id_index.entry_by_key(10), None);
 
         let mut b = BufEntryBuilder::dense();
-        while b.get_encoded_len() < cast::usize(MIN_INDEX_EACH_BYTES) {
+        while b.get_frame_len() < cast::usize(MIN_INDEX_EACH_BYTES) {
             b.message(Default::default());
         }
         let (mut entry, mut buf) = b.build();
