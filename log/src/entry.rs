@@ -39,8 +39,8 @@ pub enum ErrorId {
 
 #[derive(Clone, Copy, Debug, Eq, Fail, PartialEq)]
 pub enum BadBody {
-    #[fail(display = "entry body CRC check failed")]
-    BadCrc,
+    #[fail(display = "entry body checksum check failed")]
+    BadChecksum,
 
     #[fail(display = "found garbage after message sequence")]
     TrailingGarbage,
@@ -76,14 +76,14 @@ pub struct Update {
 #[derive(Debug)]
 pub struct BufEntry {
     frame_len: usize,
-    header_crc: u32,
+    header_checksum: u32,
     start_id: Id,
     end_id_delta: u32,
     first_timestamp: Timestamp,
     max_timestamp: Timestamp,
     flags: u16,
     term: u64,
-    body_crc: u32,
+    body_checksum: u32,
     message_count: u32,
 }
 
@@ -143,10 +143,10 @@ impl BufEntry {
         let frame_len = cast::usize(FRAME_LEN.get(buf));
         Self::check_frame_len(frame_len)?;
 
-        let header_crc = HEADER_CRC.get(buf);
-        let actual_header_crc = crc(&buf.as_slice()[format::HEADER_CRC_RANGE]);
-        if header_crc != actual_header_crc {
-            return Err(Error::new(ErrorId::BadHeader, "header CRC check failed"));
+        let header_checksum = HEADER_CHECKSUM.get(buf);
+        let actual_header_checksum = checksum(&buf.as_slice()[format::HEADER_CHECKSUM_RANGE]);
+        if header_checksum != actual_header_checksum {
+            return Err(Error::new(ErrorId::BadHeader, "header checksum check failed"));
         }
 
         let version = VERSION.get(buf);
@@ -173,7 +173,7 @@ impl BufEntry {
 
         let flags = FLAGS.get(buf);
         let term = TERM.get(buf);
-        let body_crc = BODY_CRC.get(buf);
+        let body_checksum = BODY_CHECKSUM.get(buf);
 
         let message_count = MESSAGE_COUNT.get(buf);
 
@@ -192,14 +192,14 @@ impl BufEntry {
 
         Ok(Some(Self {
             frame_len,
-            header_crc,
+            header_checksum: header_checksum,
             start_id,
             end_id_delta,
             first_timestamp,
             max_timestamp,
             flags,
             term,
-            body_crc,
+            body_checksum: body_checksum,
             message_count,
         }))
     }
@@ -234,8 +234,8 @@ impl BufEntry {
         self.frame_len
     }
 
-    pub fn header_crc(&self) -> u32 {
-        self.header_crc
+    pub fn header_checksum(&self) -> u32 {
+        self.header_checksum
     }
 
     pub fn start_id(&self) -> Id {
@@ -262,8 +262,8 @@ impl BufEntry {
         self.term
     }
 
-    pub fn body_crc(&self) -> u32 {
-        self.body_crc
+    pub fn body_checksum(&self) -> u32 {
+        self.body_checksum
     }
 
     pub fn message_count(&self) -> u32 {
@@ -300,15 +300,16 @@ impl BufEntry {
             }
         }
         if dirty {
-            BufEntryBuilder::set_header_crc(buf);
+            BufEntryBuilder::set_header_checksum(buf);
         }
     }
 
     pub fn validate_body(&self, buf: &impl Buf, options: ValidBody) -> Result<()> {
         assert!(buf.len() >= self.frame_len, "invalid buf");
 
-        if self.body_crc != crc(&buf.as_slice()[format::BODY_CRC_START..self.frame_len]) {
-            return Err(Error::without_details(BadBody::BadCrc));
+        if self.body_checksum != format::checksum(&buf.as_slice()
+                [format::BODY_CHECKSUM_START..self.frame_len]) {
+            return Err(Error::without_details(BadBody::BadChecksum));
         }
 
         if options.dense && cast::u64(self.message_count) !=
@@ -533,18 +534,18 @@ impl BufEntryBuilder {
 
     pub fn build(mut self) -> (BufEntry, BytesMut) {
         let id_range = self.get_id_range().expect("can't build dense entry without messages");
-        let (header_crc, body_crc) = self.write_prolog(id_range);
+        let (header_checksum, body_checksum) = self.write_prolog(id_range);
         let frame_len = self.get_encoded_len();
         (BufEntry {
             frame_len,
-            header_crc,
+            header_checksum,
             start_id: id_range.0,
             end_id_delta: Self::id_delta(id_range),
             first_timestamp: self.first_timestamp,
             max_timestamp: self.max_timestamp,
             flags: self.flags,
             term: self.term,
-            body_crc,
+            body_checksum,
             message_count: self.message_count,
         }, self.buf)
     }
@@ -553,7 +554,7 @@ impl BufEntryBuilder {
         next_id.checked_sub(1)
     }
 
-    /// Returns (header_crc, body_crc).
+    /// Returns (header_checksum, body_checksum).
     fn write_prolog(&mut self, id_range: (Id, Id)) -> (u32, u32) {
         use format::*;
 
@@ -564,8 +565,8 @@ impl BufEntryBuilder {
         let len = cast::u32(wr.get_ref().len()).unwrap();
         FRAME_LEN.write(wr, len).unwrap();
 
-        // skip header crc
-        wr.set_position(format::HEADER_CRC.next);
+        // skip header checksum
+        wr.set_position(format::HEADER_CHECKSUM.next);
 
         VERSION.write(wr, CURRENT_VERSION).unwrap();
         START_ID.write(wr, Some(id_range.0)).unwrap();
@@ -575,26 +576,26 @@ impl BufEntryBuilder {
         FLAGS.write(wr, self.flags).unwrap();
         TERM.write(wr, self.term).unwrap();
 
-        // skip body crc
-        wr.set_position(format::BODY_CRC.next);
+        // skip body checksum
+        wr.set_position(format::BODY_CHECKSUM.next);
 
         MESSAGE_COUNT.write(wr, self.message_count).unwrap();
 
-        let header_crc = Self::set_header_crc(wr.get_mut());
-        let body_crc = Self::set_body_crc(wr.get_mut());
+        let header_checksum = Self::set_header_checksum(wr.get_mut());
+        let body_checksum = Self::set_body_checksum(wr.get_mut());
 
-        (header_crc, body_crc)
+        (header_checksum, body_checksum)
     }
 
-    fn set_header_crc(buf: &mut [u8]) -> u32 {
-        let r = crc(&buf[format::HEADER_CRC_RANGE]);
-        format::HEADER_CRC.set(buf, r);
+    fn set_header_checksum(buf: &mut [u8]) -> u32 {
+        let r = format::checksum(&buf[format::HEADER_CHECKSUM_RANGE]);
+        format::HEADER_CHECKSUM.set(buf, r);
         r
     }
 
-    fn set_body_crc(buf: &mut [u8]) -> u32 {
-        let r = crc(&buf[format::BODY_CRC_START..]);
-        format::BODY_CRC.set(buf, r);
+    fn set_body_checksum(buf: &mut [u8]) -> u32 {
+        let r = format::checksum(&buf[format::BODY_CHECKSUM_START..]);
+        format::BODY_CHECKSUM.set(buf, r);
         r
     }
 }
@@ -613,10 +614,6 @@ impl From<MessageBuilder> for BufEntryBuilder {
         b.message(v);
         b
     }
-}
-
-fn crc(buf: &[u8]) -> u32 {
-    crc::crc32::checksum_castagnoli(buf)
 }
 
 #[cfg(test)]
@@ -675,25 +672,25 @@ mod test {
             }
 
             #[test]
-            fn bad_body_crc_field() {
-                // Check corruption in the body_crc field itself.
+            fn bad_body_checksum_field() {
+                // Check corruption in the body_checksum field itself.
                 let (_, mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
-                buf[format::BODY_CRC.pos] = !buf[format::BODY_CRC.pos];
+                buf[format::BODY_CHECKSUM.pos] = !buf[format::BODY_CHECKSUM.pos];
                 let e = BufEntry::decode(&buf).unwrap().unwrap();
 
-                assert_eq!(val_err(&e, &buf), BadBody::BadCrc.into());
+                assert_eq!(val_err(&e, &buf), BadBody::BadChecksum.into());
             }
 
             #[test]
-            fn bad_body_crc_content() {
-                // Check corruption is first and last bytes of the CRC'ed body range.
-                for &i in &[format::BODY_CRC_START as isize, -1] {
+            fn bad_body_checksum_content() {
+                // Check corruption is first and last bytes of the CHECKSUM'ed body range.
+                for &i in &[format::BODY_CHECKSUM_START as isize, -1] {
                     let (e, mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
 
                     let i = if i < 0 { buf.len() as isize + i } else { i } as usize;
                     buf[i] = !buf[i];
 
-                    assert_eq!(val_err(&e, &buf), BadBody::BadCrc.into());
+                    assert_eq!(val_err(&e, &buf), BadBody::BadChecksum.into());
                 }
             }
 
@@ -716,9 +713,9 @@ mod test {
 
                 let frame_len = buf.len() as u32;
                 format::FRAME_LEN.set(buf, frame_len);
-                BufEntryBuilder::set_header_crc(buf);
+                BufEntryBuilder::set_header_checksum(buf);
                 format::MESSAGE_COUNT.set(buf, 1);
-                BufEntryBuilder::set_body_crc(buf);
+                BufEntryBuilder::set_body_checksum(buf);
 
                 let e = BufEntry::decode(&buf).unwrap().unwrap();
                 assert_eq!(val_err(&e, &buf), BadMessages::FirstTimestampMismatch.into());
@@ -739,7 +736,7 @@ mod test {
 
                 let mismatching_timestamp = Timestamp::epoch().checked_add_millis(3).unwrap();
                 format::MAX_TIMESTAMP.set(&mut buf, Some(mismatching_timestamp));
-                BufEntryBuilder::set_header_crc(&mut buf);
+                BufEntryBuilder::set_header_checksum(&mut buf);
 
                 let e = BufEntry::decode(&buf).unwrap().unwrap();
                 assert_eq!(val_err(&e, &buf), BadMessages::MaxTimestampMismatch.into());

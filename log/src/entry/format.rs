@@ -34,7 +34,7 @@ type OptionTimestamp = Option<Timestamp>;
 
 fields! {
     FRAME_LEN: u32 = 0;
-    HEADER_CRC: u32;
+    HEADER_CHECKSUM: u32;
     VERSION: u8;
     START_ID: OptionId;
     END_ID_DELTA: u32;
@@ -42,7 +42,7 @@ fields! {
     MAX_TIMESTAMP: OptionTimestamp;
     FLAGS: u16;
     TERM: u64;
-    BODY_CRC: u32;
+    BODY_CHECKSUM: u32;
     MESSAGE_COUNT: u32;
 }
 
@@ -52,8 +52,8 @@ pub const FRAME_PROLOG_FIXED_LEN: usize = VERSION.next;
 // Prolog fields for the current version.
 pub const FRAME_PROLOG_LEN: usize = MESSAGE_COUNT.next;
 
-pub const HEADER_CRC_RANGE: Range<usize> = HEADER_CRC.next..BODY_CRC.pos;
-pub const BODY_CRC_START: usize = BODY_CRC.next;
+pub const HEADER_CHECKSUM_RANGE: Range<usize> = HEADER_CHECKSUM.next..BODY_CHECKSUM.pos;
+pub const BODY_CHECKSUM_START: usize = BODY_CHECKSUM.next;
 
 pub const MIN_FRAME_LEN: usize = MESSAGE_COUNT.next;
 
@@ -190,6 +190,6 @@ impl FieldType for Option<Timestamp> {
     }
 }
 
-pub fn crc(buf: &[u8]) -> u32 {
+pub fn checksum(buf: &[u8]) -> u32 {
     crc::crc32::checksum_castagnoli(buf)
 }
