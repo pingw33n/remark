@@ -42,22 +42,23 @@ fields! {
     MAX_TIMESTAMP: OptionTimestamp;
     FLAGS: u16;
     TERM: u64;
-    BODY_CHECKSUM: u32;
     MESSAGE_COUNT: u32;
+    BODY_CHECKSUM: u32;
 }
 
 // Frame prolog fields that are not versioned (i.e. never change across versions).
 pub const FRAME_PROLOG_FIXED_LEN: usize = VERSION.next;
 
+pub const MESSAGES_START: usize = BODY_CHECKSUM.next;
+
 // Prolog fields for the current version.
-pub const FRAME_PROLOG_LEN: usize = MESSAGE_COUNT.next;
+pub const FRAME_PROLOG_LEN: usize = MESSAGES_START;
 
 pub const HEADER_CHECKSUM_RANGE: Range<usize> = HEADER_CHECKSUM.next..BODY_CHECKSUM.pos;
-pub const BODY_CHECKSUM_START: usize = BODY_CHECKSUM.next;
 
-pub const MIN_FRAME_LEN: usize = MESSAGE_COUNT.next;
+pub const BODY_CHECKSUM_START: usize = MESSAGES_START;
 
-pub const MESSAGES_START: usize = MESSAGE_COUNT.next;
+pub const MIN_FRAME_LEN: usize = MESSAGES_START;
 
 pub const CURRENT_VERSION: u8 = 1;
 

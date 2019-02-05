@@ -173,9 +173,9 @@ impl BufEntry {
 
         let flags = FLAGS.get(buf);
         let term = TERM.get(buf);
-        let body_checksum = BODY_CHECKSUM.get(buf);
-
         let message_count = MESSAGE_COUNT.get(buf);
+
+        let body_checksum = BODY_CHECKSUM.get(buf);
 
         let id_count = cast::u64(end_id_delta) + 1;
         if cast::u64(message_count) > id_count  {
@@ -192,14 +192,14 @@ impl BufEntry {
 
         Ok(Some(Self {
             frame_len,
-            header_checksum: header_checksum,
+            header_checksum,
             start_id,
             end_id_delta,
             first_timestamp,
             max_timestamp,
             flags,
             term,
-            body_checksum: body_checksum,
+            body_checksum,
             message_count,
         }))
     }
@@ -308,7 +308,7 @@ impl BufEntry {
         assert!(buf.len() >= self.frame_len, "invalid buf");
 
         if self.body_checksum != format::checksum(&buf.as_slice()
-                [format::BODY_CHECKSUM_START..self.frame_len]) {
+                [format::MESSAGES_START..self.frame_len]) {
             return Err(Error::without_details(BadBody::BadChecksum));
         }
 
@@ -575,10 +575,6 @@ impl BufEntryBuilder {
         MAX_TIMESTAMP.write(wr, Some(self.max_timestamp)).unwrap();
         FLAGS.write(wr, self.flags).unwrap();
         TERM.write(wr, self.term).unwrap();
-
-        // skip body checksum
-        wr.set_position(format::BODY_CHECKSUM.next);
-
         MESSAGE_COUNT.write(wr, self.message_count).unwrap();
 
         let header_checksum = Self::set_header_checksum(wr.get_mut());
@@ -710,12 +706,12 @@ mod test {
                 c.set_position(format::MESSAGES_START);
                 msg.writer(Id::new(10).unwrap(), Timestamp::epoch()).write(&mut c).unwrap();
                 let ref mut buf = c.into_inner();
+                BufEntryBuilder::set_body_checksum(buf);
 
                 let frame_len = buf.len() as u32;
                 format::FRAME_LEN.set(buf, frame_len);
-                BufEntryBuilder::set_header_checksum(buf);
                 format::MESSAGE_COUNT.set(buf, 1);
-                BufEntryBuilder::set_body_checksum(buf);
+                BufEntryBuilder::set_header_checksum(buf);
 
                 let e = BufEntry::decode(&buf).unwrap().unwrap();
                 assert_eq!(val_err(&e, &buf), BadMessages::FirstTimestampMismatch.into());

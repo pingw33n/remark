@@ -1,4 +1,5 @@
 #![deny(non_snake_case)]
+#![deny(unused_imports)]
 #![deny(unused_must_use)]
 
 #[macro_use]

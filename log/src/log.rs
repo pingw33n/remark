@@ -1,6 +1,5 @@
 use itertools::Itertools;
 use log::info;
-use num_traits::cast::ToPrimitive;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::collections::VecDeque;
@@ -218,6 +217,7 @@ impl Log {
 mod test {
     use super::*;
     use super::ErrorId;
+    use num_traits::cast::ToPrimitive;
     use std::mem;
     use crate::entry::BufEntryBuilder;
     use crate::message::MessageBuilder;
