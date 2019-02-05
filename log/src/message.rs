@@ -403,18 +403,18 @@ impl Headers {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Header {
-    pub name: String,
+    pub name: Vec<u8>,
     pub value: Vec<u8>,
 }
 
 impl Header {
     pub fn encoded_len(&self) -> usize {
-        encoded_len_bstring(self.name.as_bytes()) +
+        encoded_len_bstring(self.name.as_ref()) +
             encoded_len_bstring(self.value.as_ref())
     }
 
     pub fn read(rd: &mut impl Read) -> Result<Self> {
-        let name = read_opt_string(rd)?
+        let name = read_opt_bstring(rd)?
             .ok_or_else(|| Error::without_details(ErrorId::HeaderNameIsNull))?;
         let value = read_opt_bstring(rd)?
             .ok_or_else(|| Error::without_details(ErrorId::HeaderValueIsNull))?;
@@ -425,7 +425,7 @@ impl Header {
     }
 
     pub fn write(&self, wr: &mut impl Write) -> Result<()> {
-        write_bstring(wr, self.name.as_bytes())?;
+        write_bstring(wr, &self.name)?;
         write_bstring(wr, &self.value)
     }
 }
@@ -452,16 +452,6 @@ fn read_opt_bstring(rd: &mut impl Read) -> Result<Option<Vec<u8>>> {
         vec.resize(vec.capacity(), 0);
         rd.read_exact(&mut vec).wrap_err_id(ErrorId::Io)?;
         Ok(Some(vec))
-    }
-}
-
-fn read_opt_string(rd: &mut impl Read) -> Result<Option<String>> {
-    if let Some(s) = read_opt_bstring(rd)? {
-        String::from_utf8(s)
-            .map(Some)
-            .map_err(|_| Error::without_details(ErrorId::MalformedUtf8))
-    } else {
-        Ok(None)
     }
 }
 
