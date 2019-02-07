@@ -1,0 +1,20 @@
+syntax = "proto3";
+package push;
+
+import "common.proto";
+
+message Request {
+    message Entry {
+        string topic_name = 1;
+        uint32 shard_id = 2;
+    }
+    repeated Entry entries = 1;
+}
+
+message Response {
+    message Entry {
+        common.Status status = 1;
+    }
+    common.Response common = 1;
+    repeated Entry entries = 2;
+}

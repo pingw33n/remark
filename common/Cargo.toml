@@ -1,0 +1,9 @@
+[package]
+name = "remark-common"
+version = "0.1.0"
+authors = ["Dmytro Lysai <d@emphased.net>"]
+license = "Apache-2.0"
+edition = "2018"
+
+[dependencies]
+backtrace = "0.3"

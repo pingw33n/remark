@@ -118,13 +118,14 @@ mod test {
 
     mod multi_process {
         use super::*;
-        use rand::{Rng, thread_rng};
+        use rand::Rng;
         use rusty_fork::*;
         use std::env;
         use std::fs::{self, OpenOptions};
         use std::io::prelude::*;
         use std::path::PathBuf;
         use std::time::Duration;
+        use crate::util::test_common::thread_rng;
 
         const PROCESS_COUNT: usize = 4;
         const GROUP_COUNT: usize = 20;

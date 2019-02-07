@@ -1,0 +1,15 @@
+syntax = "proto3";
+package common;
+
+enum Status {
+    OK                  = 0;
+    INNER_ERRORS        = 1;
+    BAD_ENTRY           = 2;
+    BAD_REQUEST         = 3;
+    BAD_TOPIC_NAME      = 4;
+    BAD_TOPIC_SHARD_ID  = 5;
+}
+
+message Response {
+    Status status = 1;
+}

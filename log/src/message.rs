@@ -3,7 +3,6 @@ use num_integer::Integer;
 use num_traits::cast::ToPrimitive;
 use std::fmt;
 use std::io::prelude::*;
-use std::num::NonZeroU64;
 use std::ops;
 use std::time::{Duration, SystemTime};
 
@@ -36,36 +35,42 @@ pub enum ErrorId {
 }
 
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Id(NonZeroU64);
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Id(u64);
 
 impl Id {
-    pub fn new(id: u64) -> Option<Self> {
-        NonZeroU64::new(id).map(Self)
+    pub const fn new(id: u64) -> Self {
+        Self(id)
     }
 
-    pub fn min_value() -> Self {
-        Self::new(1).unwrap()
+    pub const fn min_value() -> Self {
+        Self::new(0)
     }
 
-    pub fn max_value() -> Self {
-        Self::new(u64::max_value()).unwrap()
+    pub const fn max_value() -> Self {
+        Self::new(u64::max_value())
     }
 
-    pub fn as_u64(self) -> u64 {
-        self.0.get()
+    pub fn get(self) -> u64 {
+        self.0
     }
 
     pub fn checked_add(self, rhs: u64) -> Option<Self> {
-        self.0.get().checked_add(rhs).map(|v| Self::new(v).unwrap())
+        self.0.checked_add(rhs).map(Self::new)
     }
 
     pub fn checked_sub(self, rhs: u64) -> Option<Self> {
-        self.0.get().checked_sub(rhs).and_then(Self::new)
+        self.0.checked_sub(rhs).map(Self::new)
     }
 
     pub fn checked_delta(self, rhs: Self) -> Option<u64> {
-        self.0.get().checked_sub(rhs.as_u64())
+        self.0.checked_sub(rhs.get())
+    }
+}
+
+impl fmt::Debug for Id {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Id({})", self.0)
     }
 }
 
@@ -93,7 +98,7 @@ impl ops::Sub for Id {
     type Output = u64;
 
     fn sub(self, rhs: Self) -> Self::Output {
-        self.as_u64().checked_sub(rhs.as_u64()).unwrap()
+        self.get().checked_sub(rhs.get()).unwrap()
     }
 }
 
@@ -481,8 +486,8 @@ mod test {
         #[test]
         fn checked_delta() {
             assert_eq!(Id::min_value().checked_delta(Id::min_value()), Some(0));
-            assert_eq!(Id::new(2).unwrap().checked_delta(Id::new(1).unwrap()), Some(1));
-            assert_eq!(Id::min_value().checked_delta(Id::new(2).unwrap()), None);
+            assert_eq!(Id::new(2).checked_delta(Id::new(1)), Some(1));
+            assert_eq!(Id::min_value().checked_delta(Id::new(2)), None);
             assert_eq!(Id::min_value().checked_delta(Id::max_value()), None);
         }
     }
@@ -519,7 +524,7 @@ mod test {
                     .. Default::default()
                 }.build(),
                 Message {
-                    id: Id::new(12345).unwrap(),
+                    id: Id::new(12345),
                     timestamp: now,
                     headers: Headers {
                         vec: vec![
@@ -536,7 +541,7 @@ mod test {
             for msg in d {
                 for &(next_id, next_timestamp) in &[
                     (Id::min_value(), Timestamp::epoch()),
-                    (Id::new(12345).unwrap(), now),
+                    (Id::new(12345), now),
                 ] {
                     cur.set_position(0);
                     cur.get_mut().clear();

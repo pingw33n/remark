@@ -81,7 +81,7 @@ pub struct Update {
     pub first_timestamp: Option<Timestamp>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BufEntry {
     frame_len: usize,
     header_checksum: u32,
@@ -165,8 +165,7 @@ impl BufEntry {
             return Ok(None);
         }
 
-        let start_id = START_ID.get(buf).ok_or_else(||
-            Error::new(ErrorId::BadHeader, "start_id must not be 0"))?;
+        let start_id = START_ID.get(buf);
         let end_id_delta = END_ID_DELTA.get(buf);
         let end_id = start_id.checked_add(cast::u64(end_id_delta)).ok_or_else(||
             Error::new(ErrorId::BadHeader, "end_id overflows u64"))?;
@@ -217,6 +216,9 @@ impl BufEntry {
     }
 
     pub fn iter<T: Buf>(&self, buf: T) -> BufEntryIter<Cursor<T>> {
+        if buf.len() == format::FRAME_PROLOG_LEN {
+            panic!("`buf` seems to be incomplete, did you forget to call complete_read()?");
+        }
         assert!(buf.len() >= self.frame_len);
         let mut rd = Cursor::new(buf);
         rd.set_position(format::MESSAGES_START);
@@ -291,7 +293,7 @@ impl BufEntry {
             then {
                 assert!(start_id.checked_add(cast::u64(self.end_id_delta)).is_some());
                 self.start_id = start_id;
-                format::START_ID.set(buf, Some(start_id));
+                format::START_ID.set(buf, start_id);
                 dirty = true;
             }
         }
@@ -312,7 +314,7 @@ impl BufEntry {
             }
         }
         if dirty {
-            BufEntryBuilder::set_header_checksum(buf);
+            self.header_checksum = BufEntryBuilder::set_header_checksum(buf);
         }
     }
 
@@ -370,8 +372,8 @@ impl BufEntry {
 }
 
 enum ReadState<R: BufRead> {
+    Empty,
     Init { rd: R, compression: Codec },
-    Initing,
     Decoder(Decoder<R>),
 }
 
@@ -390,7 +392,7 @@ impl<R: BufRead> Iterator for BufEntryIter<R> {
             return None;
         }
         if matches!(self.rd, ReadState::Init {..}) {
-            if let ReadState::Init { rd, compression } = mem::replace(&mut self.rd, ReadState::Initing) {
+            if let ReadState::Init { rd, compression } = mem::replace(&mut self.rd, ReadState::Empty) {
                 let rd = Decoder::new(rd, compression);
                 if rd.is_err() {
                     return Some(rd.map(|_| unreachable!()).wrap_err_id(ErrorId::Io));
@@ -506,7 +508,6 @@ impl BufEntryBuilder {
     }
 
     pub fn message(&mut self, mut msg: MessageBuilder) -> &mut Self {
-        let expected_next_id = self.next_id;
         if msg.id.is_none() {
             msg.id = Some(self.next_id);
         } else {
@@ -515,7 +516,6 @@ impl BufEntryBuilder {
             assert!(self.end_id.is_none() || msg_id <= self.end_id.unwrap());
             self.next_id = msg_id;
         }
-        self.next_id = self.next_id.checked_add(1).unwrap();
 
         if msg.timestamp.is_none() {
             msg.timestamp = Some(self.next_timestamp);
@@ -525,13 +525,17 @@ impl BufEntryBuilder {
 
         let msg = msg.build();
 
-        if self.message_count == 0 {
+        let expected_next_id = if self.message_count == 0 {
             if self.start_id.is_none() {
                 self.start_id = Some(msg.id);
             }
             self.first_timestamp = msg.timestamp;
             self.next_timestamp = msg.timestamp;
-        }
+            self.start_id.unwrap()
+        } else {
+            self.next_id
+        };
+        self.next_id = self.next_id.checked_add(1).unwrap();
 
         let expected_next_timestamp = self.next_timestamp;
         self.next_timestamp = msg.timestamp;
@@ -609,7 +613,7 @@ impl BufEntryBuilder {
         FRAME_LEN.set(buf, len);
 
         VERSION.set(buf, CURRENT_VERSION);
-        START_ID.set(buf, Some(id_range.0));
+        START_ID.set(buf, id_range.0);
         END_ID_DELTA.set(buf, Self::id_delta(id_range));
         FIRST_TIMESTAMP.set(buf, Some(self.first_timestamp));
         MAX_TIMESTAMP.set(buf, Some(self.max_timestamp));
@@ -690,9 +694,9 @@ mod test {
 
         #[test]
         fn compression() {
-            let msgs_b: Vec<_> = (1..100)
+            let msgs_b: Vec<_> = (0..100)
                 .map(|i| MessageBuilder {
-                    id: Some(Id::new(i).unwrap()),
+                    id: Some(Id::new(i)),
                     timestamp: Some(Timestamp::now()),
                     key: Some("key1".into()),
                     value: Some("value1".into()),
@@ -723,10 +727,43 @@ mod test {
                 assert_eq!(actual, msgs);
             }
         }
+
+        #[test]
+        fn expected_next_id_is_first_msg_id() {
+            let mut b = BufEntryBuilder::dense();
+            b.message(MessageBuilder { id: Some(Id::new(1000)), ..Default::default() });
+            let (mut e, mut buf) = b.build();
+
+            e.update(&mut buf, Update { start_id: Some(Id::new(0)), ..Default::default() });
+            assert_eq!(e.iter(&buf).next().unwrap().unwrap().id, Id::new(0));
+        }
     }
 
     mod buf_entry {
         use super::*;
+
+        #[test]
+        fn update() {
+            let (mut e, mut buf) = BufEntryBuilder::sparse(Id::new(123), Id::new(223)).build();
+            assert_eq!(e.start_id(), Id::new(123));
+            assert_eq!(e.end_id(), Id::new(223));
+
+            let now = Timestamp::now();
+
+            e.update(&mut buf, Update {
+                start_id: Some(Id::new(12345)),
+                first_timestamp: Some(now),
+            });
+
+            let e2 = BufEntry::decode(&buf).unwrap().unwrap();
+
+            assert_eq!(e, e2);
+
+            assert_eq!(e.start_id(), Id::new(12345));
+            assert_eq!(e.end_id(), Id::new(12345 + 100));
+            assert_eq!(e.first_timestamp(), now);
+            assert_eq!(e.max_timestamp(), now);
+        }
 
         mod validate_body {
             use super::*;
@@ -768,19 +805,19 @@ mod test {
 
             #[test]
             fn first_timestamp_mismatch() {
-                let b = BufEntryBuilder::sparse(Id::new(10).unwrap(), Id::new(20).unwrap());
+                let b = BufEntryBuilder::sparse(Id::new(10), Id::new(20));
                 let (_, buf) = b.build();
 
                 // Have to craft an entry with bad first_timestamp since BufEntryBuilder
                 // always sets valid value for the field.
                 let msg = MessageBuilder {
-                    id: Id::new(10),
+                    id: Some(Id::new(10)),
                     timestamp: Some(Timestamp::epoch().checked_add_millis(1).unwrap()),
                     ..Default::default()
                 }.build();
                 let mut c = Cursor::new(buf);
                 c.set_position(format::MESSAGES_START);
-                msg.writer(Id::new(10).unwrap(), Timestamp::epoch()).write(&mut c).unwrap();
+                msg.writer(Id::new(10), Timestamp::epoch()).write(&mut c).unwrap();
                 let ref mut buf = c.into_inner();
                 BufEntryBuilder::set_body_checksum(buf);
 
@@ -833,8 +870,8 @@ mod test {
 
             #[test]
             fn without_timestamp_violated_in_header() {
-                let (mut e, mut buf) = BufEntryBuilder::sparse(Id::new(10).unwrap(),
-                    Id::new(100).unwrap()).build();
+                let (mut e, mut buf) = BufEntryBuilder::sparse(Id::new(10),
+                    Id::new(100)).build();
                 e.update(&mut buf, Update {
                     first_timestamp: Some(Timestamp::min_value()),
                     ..Default::default()
@@ -850,7 +887,7 @@ mod test {
                 let (e, buf) = BufEntryBuilder::from(vec![
                     MessageBuilder::default(),
                     MessageBuilder {
-                        id: Id::new(100),
+                        id: Some(Id::new(100)),
                         ..Default::default()
                     },
                 ]).build();
@@ -862,8 +899,8 @@ mod test {
             #[test]
             fn dense_violated_outer() {
                 // No gaps after start_id and before end_id.
-                let mut b = BufEntryBuilder::sparse(Id::new(50).unwrap(), Id::new(100).unwrap());
-                b.message(MessageBuilder { id: Id::new(75), .. Default::default() });
+                let mut b = BufEntryBuilder::sparse(Id::new(50), Id::new(100));
+                b.message(MessageBuilder { id: Some(Id::new(75)), .. Default::default() });
                 let (e, buf) = b.build();
 
                 assert_eq!(val_err_opts(&e, &buf, true, false),

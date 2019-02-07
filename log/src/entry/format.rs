@@ -27,14 +27,13 @@ macro_rules! fields {
     (@impl $pos:expr =>) => {};
 }
 
-type OptionId = Option<Id>;
 type OptionTimestamp = Option<Timestamp>;
 
 fields! {
     FRAME_LEN: u32 = 0;
     HEADER_CHECKSUM: u32;
     VERSION: u8;
-    START_ID: OptionId;
+    START_ID: Id;
     END_ID_DELTA: u32;
     FIRST_TIMESTAMP: OptionTimestamp;
     MAX_TIMESTAMP: OptionTimestamp;
@@ -134,13 +133,13 @@ impl FieldType for i64 {
     }
 }
 
-impl FieldType for Option<Id> {
+impl FieldType for Id {
     fn get(buf: &impl Buf, i: usize) -> Self {
         Id::new(u64::get(buf, i))
     }
 
     fn set(&self, buf: &mut [u8]) {
-        self.map(|v| v.as_u64()).unwrap_or(0).set(buf);
+        self.get().set(buf);
     }
 }
 

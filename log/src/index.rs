@@ -476,8 +476,9 @@ mod test {
     fn threaded() {
         env_logger::init();
 
-        use rand::{Rng, thread_rng};
+        use rand::Rng;
         use std::thread;
+        use crate::util::test_common::thread_rng;
 
         const ENTRY_COUNT: usize = 3000;
         const THREAD_COUNT: usize = 32;

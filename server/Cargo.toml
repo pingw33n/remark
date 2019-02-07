@@ -1,0 +1,15 @@
+[package]
+name = "remark-server"
+version = "0.1.0"
+authors = ["Dmytro Lysai <d@emphased.net>"]
+license = "Apache-2.0"
+edition = "2018"
+
+[dependencies]
+remark-log = { path = "../log" }
+remark-proto = { path = "../proto" }
+
+byteorder = "1.3"
+bytes = "0.4"
+if_chain = "0.1"
+prost = "0.4"
