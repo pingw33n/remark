@@ -3,7 +3,7 @@ pub(in crate) mod format;
 use byteorder::{BigEndian, ReadBytesExt};
 use if_chain::if_chain;
 use matches::matches;
-use num_traits::cast::FromPrimitive;
+use num_traits::cast::{FromPrimitive, ToPrimitive};
 use std::io::prelude::*;
 use std::mem;
 
@@ -49,6 +49,9 @@ pub enum ErrorId {
 pub enum BadBody {
     #[fail(display = "entry body checksum check failed")]
     BadChecksum,
+
+    #[fail(display = "found less messages than declared in the entry header")]
+    TooFewMessages,
 
     #[fail(display = "found garbage after message sequence")]
     TrailingGarbage,
@@ -216,7 +219,7 @@ impl BufEntry {
     }
 
     pub fn iter<T: Buf>(&self, buf: T) -> BufEntryIter<Cursor<T>> {
-        if buf.len() == format::FRAME_PROLOG_LEN {
+        if self.message_count > 0 && buf.len() == format::FRAME_PROLOG_LEN {
             panic!("`buf` seems to be incomplete, did you forget to call complete_read()?");
         }
         assert!(buf.len() >= self.frame_len);
@@ -227,6 +230,7 @@ impl BufEntry {
             next_timestamp: self.first_timestamp,
             left: self.message_count,
             rd: ReadState::Init { rd, compression: self.compression },
+            last_pos: None,
         }
     }
 
@@ -337,34 +341,36 @@ impl BufEntry {
         }
 
         let buf = &buf.as_slice()[..self.frame_len];
-        let mut rd = Cursor::new(buf);
-        rd.set_position(format::MESSAGES_START);
-        let mut next_id = self.start_id;
-        let mut next_timestamp = self.first_timestamp;
+        let mut prev_id = self.start_id;
         let mut max_timestamp = None;
-        for i in 0..self.message_count {
-            // TODO implement more efficient reading of message specifically for validation.
-            let msg = Message::read(&mut rd, next_id, next_timestamp)
-                .context("reading message for validation")?;
+        // TODO implement more efficient reading of message specifically for validation.
+        let mut it = self.iter(buf);
+        let mut i = 0;
+        while i < self.message_count {
+            let msg = if let Some(msg) = it.next() {
+                msg.context("reading message for validation")?
+            } else {
+                return Err(Error::without_details(BadBody::TooFewMessages));
+            };
             if i == 0 && msg.timestamp != self.first_timestamp {
                 return Err(Error::without_details(BadMessages::FirstTimestampMismatch));
             }
-            if options.dense && msg.id - next_id != 0 {
+            if options.dense && msg.id - prev_id != (i > 0) as u64 {
                 return Err(Error::without_details(ErrorId::DenseRequired));
             }
             if options.without_timestamp && msg.timestamp != self.first_timestamp {
                 return Err(Error::without_details(ErrorId::WithoutTimestampRequired));
             }
+            prev_id = msg.id;
             if max_timestamp.is_none() || msg.timestamp > max_timestamp.unwrap() {
                 max_timestamp = Some(msg.timestamp);
             }
-            next_id += 1;
-            next_timestamp = msg.timestamp;
+            i += 1;
         }
         if max_timestamp.is_some() && max_timestamp.unwrap() != self.max_timestamp {
             return Err(Error::without_details(BadMessages::MaxTimestampMismatch));
         }
-        if rd.available() > 0 {
+        if it.next_pos() < self.frame_len.to_u32().unwrap() {
             return Err(Error::without_details(BadBody::TrailingGarbage))
         }
         Ok(())
@@ -382,9 +388,24 @@ pub struct BufEntryIter<R: BufRead> {
     next_timestamp: Timestamp,
     left: u32,
     rd: ReadState<R>,
+    last_pos: Option<u32>,
 }
 
-impl<R: BufRead> Iterator for BufEntryIter<R> {
+impl<T: Buf> BufEntryIter<Cursor<T>> {
+    pub fn last_pos(&self) -> Option<u32> {
+        self.last_pos
+    }
+
+    pub fn next_pos(&self) -> u32 {
+        match &self.rd {
+            ReadState::Init { rd, .. } => rd.position().to_u32().unwrap(),
+            ReadState::Decoder(dec) => dec.get_ref().position().to_u32().unwrap(),
+            ReadState::Empty => unreachable!(),
+        }
+    }
+}
+
+impl<T: Buf> Iterator for BufEntryIter<Cursor<T>> {
     type Item = Result<Message>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -407,6 +428,7 @@ impl<R: BufRead> Iterator for BufEntryIter<R> {
         } else {
             unreachable!()
         };
+        let last_pos = rd.get_ref().position().to_u32().unwrap();
         Some(match Message::read(rd, self.next_id, self.next_timestamp) {
             Ok(msg) => {
                 self.left -= 1;
@@ -417,6 +439,7 @@ impl<R: BufRead> Iterator for BufEntryIter<R> {
                     }
                 }
                 self.next_timestamp = msg.timestamp;
+                self.last_pos = Some(last_pos);
                 Ok(msg)
             }
             Err(e) => Err(e),
@@ -718,6 +741,8 @@ mod test {
             let uncompressed_len = (encoded[0].1).1.len();
 
             for (codec, (entry, buf)) in encoded {
+                entry.validate_body(&buf, ValidBody { dense: false, without_timestamp: false }).unwrap();
+
                 assert_eq!(entry.compression(), codec);
                 if codec != Codec::Uncompressed {
                     assert!(buf.len() < uncompressed_len);
