@@ -12,6 +12,12 @@ pub enum Codec {
 pub struct Decoder<R: BufRead>(DecoderInner<R>);
 
 impl<R: BufRead> Decoder<R> {
+    pub fn get_ref(&self) -> &R {
+        self.0.get_ref()
+    }
+}
+
+impl<R: BufRead> Decoder<R> {
     pub fn new(rd: R, codec: Codec) -> Result<Self> {
         Ok(Self(match codec {
             Codec::Uncompressed => DecoderInner::Uncompressed(rd),
@@ -31,6 +37,16 @@ enum DecoderInner<R: BufRead> {
     Uncompressed(R),
     Lz4(lz4::Decoder<R>),
     Zstd(zstd::Decoder<R>),
+}
+
+impl<R: BufRead> DecoderInner<R> {
+    pub fn get_ref(&self) -> &R {
+        match self {
+            DecoderInner::Uncompressed(rd) => rd,
+            DecoderInner::Lz4(dec) => dec.reader(),
+            DecoderInner::Zstd(dec) => dec.get_ref(),
+        }
+    }
 }
 
 impl<R: BufRead> Read for DecoderInner<R> {
