@@ -13,6 +13,9 @@ use remark_log::log::Log;
 use remark_log::message::MessageBuilder;
 use remark_proto::*;
 
+#[global_allocator]
+static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
+
 struct Topic {
     shards: Vec<Shard>,
 }
@@ -59,6 +62,7 @@ impl Server {
         for (req_entry, (entry, buf)) in request.entries.iter().zip(entries.iter_mut()) {
             let status = if let Some(topic) = self.topics.get_mut(&req_entry.topic_name) {
                 if let Some(shard) = topic.shards.get_mut(req_entry.shard_id as usize) {
+                    measure_time::print_time!("push");
                     match shard.log.push(entry, buf) {
                         Ok(()) => Status::Ok,
                         Err(e) => {
@@ -91,10 +95,16 @@ fn main() {
             }
         ]
     };
-    let (entry, buf) = BufEntryBuilder::from(vec![
-        MessageBuilder { value: Some("test 1".into()), ..Default::default() },
-        MessageBuilder { value: Some("test 2".into()), ..Default::default() },
-    ]).build();
+
+    let mut b = BufEntryBuilder::dense();
+    b.compression(remark_log::entry::Codec::Lz4);
+    (0..100000)
+        .for_each(|i| { b.message(MessageBuilder { value: Some(format!("test {}", i).into()), ..Default::default() }); });
+    let (entry, buf) = b.build();
+    std::fs::File::create("/tmp/rementry_big.bin").unwrap().write_all(&buf).unwrap();
+
+    BufEntry::decode(&buf).unwrap().unwrap().validate_body(&buf,
+        remark_log::entry::ValidBody { dense: true, without_timestamp: true } ).unwrap();
 
     let mut server = Server::new().unwrap();
 
@@ -105,13 +115,16 @@ fn main() {
                 println!("new connectoin: {}", stream.peer_addr().unwrap());
 
                 loop {
-                    let len = stream.read_u32::<BigEndian>().unwrap();
+                    measure_time::print_time!("");
+                    let len = match stream.read_u32::<BigEndian>() {
+                        Ok(v) => v,
+                        Err(_) => break,
+                    };
                     let mut buf = Vec::new();
                     buf.resize(len as usize, 0);
                     stream.read_exact(&mut buf).unwrap();
 
                     let req = push::Request::decode(&buf).unwrap();
-                    dbg!(&req);
 
                     let mut entries = Vec::new();
                     for _ in 0..req.entries.len() {
@@ -125,12 +138,9 @@ fn main() {
                     }
 
                     let resp = server.push(&req, &mut entries);
-                    dbg!(&resp);
                     let mut buf = Vec::new();
                     buf.write_u32::<BigEndian>(resp.encoded_len() as u32).unwrap();
-                    dbg!(buf.len());
                     resp.encode(&mut buf).unwrap();
-                    dbg!(buf.len());
                     stream.write_all(&buf).unwrap();
                 }
             }
