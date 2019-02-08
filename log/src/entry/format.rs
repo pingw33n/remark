@@ -2,8 +2,8 @@ use byteorder::{BigEndian, ByteOrder};
 use std::ops::Range;
 use std::marker::PhantomData;
 
-use crate::bytes::Buf;
 use crate::message::{Id, Timestamp};
+use rcommon::bytes::Buf;
 
 macro_rules! fields {
     ($name:ident: $ty:tt = $pos:expr; $($rest:tt)*) => {

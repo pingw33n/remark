@@ -1,3 +1,7 @@
+extern crate remark_common as rcommon;
+extern crate remark_log as rlog;
+extern crate remark_proto as rproto;
+
 use byteorder::{BigEndian, ByteOrder, ReadBytesExt, WriteBytesExt};
 use bytes::{Buf, BufMut};
 use if_chain::if_chain;
@@ -6,12 +10,12 @@ use std::collections::HashMap;
 use std::net::TcpListener;
 use std::io::prelude::*;
 
-use remark_log::entry::{BufEntry, BufEntryBuilder};
-use remark_log::error::{ErrorId, Result};
-use remark_log::bytes::*;
-use remark_log::log::Log;
-use remark_log::message::MessageBuilder;
-use remark_proto::*;
+use rcommon::bytes::*;
+use rlog::entry::{BufEntry, BufEntryBuilder};
+use rlog::error::{ErrorId, Result};
+use rlog::log::Log;
+use rlog::message::MessageBuilder;
+use rproto::*;
 
 #[global_allocator]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;

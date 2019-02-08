@@ -3,10 +3,11 @@
 #![deny(unused_imports)]
 #![deny(unused_must_use)]
 
+extern crate remark_common as rcommon;
+
 #[macro_use]
 mod macros;
 
-pub mod bytes;
 pub mod entry;
 pub mod error;
 pub mod file;

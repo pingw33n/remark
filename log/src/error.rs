@@ -1,7 +1,7 @@
 pub use failure_derive::Fail;
-pub use remark_common::error::{ResultExt, ResultErrorExt};
+pub use rcommon::error::{ResultExt, ResultErrorExt};
 
-pub type Error = remark_common::error::Error<ErrorId>;
+pub type Error = rcommon::error::Error<ErrorId>;
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone, Copy, Debug, Eq, Fail, PartialEq)]

@@ -6,6 +6,7 @@ license = "Apache-2.0"
 edition = "2018"
 
 [dependencies]
+remark-common = { path = "../common" }
 remark-log = { path = "../log" }
 remark-proto = { path = "../proto" }
 

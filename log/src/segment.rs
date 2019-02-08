@@ -1,20 +1,20 @@
 use if_chain::if_chain;
 use log::{debug, warn};
 use matches::matches;
+use std::borrow::Borrow;
 use std::cmp;
 use std::io::prelude::*;
 use std::ops::{Bound, RangeBounds};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::bytes::*;
 use crate::entry::{BufEntry, Update, ValidBody};
 use crate::entry::format;
 use crate::error::*;
 use crate::file::*;
 use crate::index::{self as index, Index};
 use crate::message::{Id, Timestamp};
-use std::borrow::Borrow;
+use rcommon::bytes::*;
 
 pub const HARD_MAX_SEGMENT_LEN: u32 = u32::max_value() as u32 - 1024;
 

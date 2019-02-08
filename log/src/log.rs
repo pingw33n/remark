@@ -11,13 +11,14 @@ use std::result::{Result as StdResult};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::bytes::*;
+
 use crate::entry::BufEntry;
 use crate::entry::format::MIN_FRAME_LEN;
 use crate::error::*;
 use crate::message::{Id, Timestamp};
 use crate::segment::{self, Iter as SegIter, Segment};
 use crate::util::file_mutex::FileMutex;
+use rcommon::bytes::*;
 
 #[derive(Clone, Copy, Debug, Eq, Fail, PartialEq)]
 pub enum ErrorId {

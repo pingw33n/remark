@@ -9,11 +9,11 @@ use std::mem;
 
 pub use crate::util::compress::Codec;
 
-use crate::bytes::*;
 use crate::error::*;
 use crate::file::FileRead;
 use crate::message::{Id, Message, MessageBuilder, Timestamp};
 use crate::util::compress::*;
+use rcommon::bytes::*;
 
 #[derive(Clone, Copy, Debug, Eq, Fail, PartialEq)]
 pub enum ErrorId {
