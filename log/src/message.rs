@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::error::*;
 use crate::util::DurationExt;
-use crate::util::varint::{self, ReadExt, WriteExt};
+use rcommon::varint::{self, ReadExt, WriteExt};
 
 #[derive(Clone, Copy, Debug, Eq, Fail, PartialEq)]
 pub enum ErrorId {

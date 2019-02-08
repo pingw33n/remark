@@ -3,7 +3,6 @@ pub mod compress;
 pub mod file_mutex;
 #[cfg(test)]
 pub mod test_common;
-pub mod varint;
 
 use std::fmt;
 use std::time::Duration;
