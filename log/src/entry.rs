@@ -10,10 +10,10 @@ use std::mem;
 pub use crate::util::compress::Codec;
 
 use crate::error::*;
-use crate::file::FileRead;
 use crate::message::{Id, Message, MessageBuilder, Timestamp};
 use crate::util::compress::*;
 use rcommon::bytes::*;
+use rcommon::io::BoundRead;
 
 #[derive(Clone, Copy, Debug, Eq, Fail, PartialEq)]
 pub enum ErrorId {
@@ -102,15 +102,41 @@ pub struct BufEntry {
 const MAX_ENTRY_LEN: usize = 1024 * 1024 * 1024;
 
 impl BufEntry {
-    fn read_frame_buf(rd: &mut impl FileRead, buf: &mut impl GrowableBuf, prolog_only: bool) -> Result<bool> {
-        if rd.available() < format::FRAME_PROLOG_FIXED_LEN as u64 {
+    fn read_frame_buf_full(rd: &mut impl Read, buf: &mut impl GrowableBuf) -> Result<bool> {
+        macro_rules! return_if_eof {
+            ($e:expr => $r:expr) => {
+                match $e {
+                    Ok(v) => v,
+                    Err(e) => return if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                        $r
+                    } else {
+                        Err(e).wrap_err_id(ErrorId::Io)
+                    },
+                }
+            };
+        }
+
+        let len = return_if_eof!(rd.read_u32::<BigEndian>() => Ok(false)).to_usize().unwrap();
+        BufEntry::check_frame_len(len)?;
+
+        buf.set_len_zeroed(len);
+        format::FRAME_LEN.set(buf.as_mut_slice(), len as u32);
+        return_if_eof!(rd.read_exact(&mut buf.as_mut_slice()[format::FRAME_LEN.next..len]) =>
+            Ok(false));
+
+        Ok(true)
+    }
+
+    fn read_frame_buf(rd: &mut impl BoundRead, buf: &mut impl GrowableBuf,
+            prolog_only: bool) -> Result<bool> {
+        if rd.available().wrap_err_id(ErrorId::Io)? < format::FRAME_PROLOG_FIXED_LEN as u64 {
             return Ok(false);
         }
 
         let len = cast::usize(rd.read_u32::<BigEndian>().wrap_err_id(ErrorId::Io)?);
         BufEntry::check_frame_len(len)?;
 
-        if rd.available() < (len - format::FRAME_LEN.next) as u64 {
+        if rd.available().wrap_err_id(ErrorId::Io)? < (len - format::FRAME_LEN.next) as u64 {
             return Ok(false);
         }
 
@@ -128,21 +154,21 @@ impl BufEntry {
         Ok(true)
     }
 
-    fn read0(rd: &mut impl FileRead, buf: &mut impl GrowableBuf,
-            prolog_only: bool) -> Result<Option<Self>> {
-        if Self::read_frame_buf(rd, buf, prolog_only)? {
+    pub fn read_full(rd: &mut impl Read, buf: &mut impl GrowableBuf) -> Result<Option<Self>> {
+        if Self::read_frame_buf_full(rd, buf)? {
             Self::decode(buf)
         } else {
             Ok(None)
         }
     }
 
-    pub fn read_full(rd: &mut impl FileRead, buf: &mut impl GrowableBuf) -> Result<Option<Self>> {
-        Self::read0(rd, buf, false)
-    }
-
-    pub fn read_prolog(rd: &mut impl FileRead, buf: &mut impl GrowableBuf) -> Result<Option<Self>> {
-        Self::read0(rd, buf, true)
+    /// Reads entry frame up to where messages data start. Requires `BoundRead` so it can proactively detect truncation.
+    pub fn read_prolog(rd: &mut impl BoundRead, buf: &mut impl GrowableBuf) -> Result<Option<Self>> {
+        if Self::read_frame_buf(rd, buf, true)? {
+            Self::decode(buf)
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn decode(buf: &impl Buf) -> Result<Option<Self>> {

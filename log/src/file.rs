@@ -1,4 +1,5 @@
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
+use std::borrow::Borrow;
 use std::fs;
 use std::io::prelude::*;
 use std::io::{Error, Result};
@@ -8,8 +9,7 @@ use std::sync::atomic::Ordering;
 
 use crate::util::atomic::AtomicU64;
 use crate::util::*;
-use parking_lot::MutexGuard;
-use std::borrow::Borrow;
+use rcommon::io::BoundRead;
 
 pub struct OpenOptions {
     read_only: bool,
@@ -142,17 +142,6 @@ impl File {
     }
 }
 
-pub trait FileRead: Read {
-    fn file(&self) -> &File;
-    fn position(&self) -> u64;
-    fn set_position(&mut self, position: u64);
-    fn advance(&mut self, delta: u64);
-    fn available(&self) -> u64;
-    fn is_eof(&self) -> bool {
-        self.available() == 0
-    }
-}
-
 pub struct Reader<F> {
     file: F,
     position: u64,
@@ -172,30 +161,40 @@ impl<F: Borrow<File>> Read for Reader<F> {
     }
 }
 
-impl<F: Borrow<File>> FileRead for Reader<F> {
-    fn file(&self) -> &File {
+impl<F: Borrow<File>> Reader<F> {
+    pub fn file(&self) -> &File {
         self.file.borrow()
     }
 
-    fn position(&self) -> u64 {
+    pub fn position(&self) -> u64 {
         self.position
     }
 
-    fn set_position(&mut self, position: u64) {
+    pub fn set_position(&mut self, position: u64) {
         self.position = position;
     }
 
-    fn advance(&mut self, delta: u64) {
+    pub fn advance(&mut self, delta: u64) {
         self.position = self.position.checked_add(delta).unwrap();
     }
 
-    fn available(&self) -> u64 {
+    pub fn available(&self) -> u64 {
         let len = self.file.borrow().len();
         if self.position < len {
             len - self.position
         } else {
             0
         }
+    }
+}
+
+impl<F: Borrow<File>> BoundRead for Reader<F> {
+    fn available(&self) -> Result<u64> {
+        Ok(self.available())
+    }
+
+    fn is_eof(&self) -> Result<bool> {
+        unimplemented!()
     }
 }
 

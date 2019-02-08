@@ -132,12 +132,8 @@ fn main() {
 
                     let mut entries = Vec::new();
                     for _ in 0..req.entries.len() {
-                        let len = stream.read_u32::<BigEndian>().unwrap();
                         let mut buf = Vec::new();
-                        buf.ensure_len_zeroed(len as usize);
-                        BigEndian::write_u32(buf.as_mut_slice(), len);
-                        stream.read_exact(&mut buf.as_mut_slice()[4..]).unwrap();
-                        let entry = BufEntry::decode(&buf).unwrap().unwrap();
+                        let entry = BufEntry::read_full(&mut stream, &mut buf).unwrap().unwrap();
                         entries.push((entry, buf));
                     }
 
