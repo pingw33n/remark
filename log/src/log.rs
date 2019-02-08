@@ -165,7 +165,7 @@ impl Log {
         })
     }
 
-    pub fn push(&self, entry: &mut BufEntry, buf: &mut BytesMut) -> Result<()> {
+    pub fn push(&self, entry: &mut BufEntry, buf: &mut impl GrowableBuf) -> Result<()> {
         self.inner.lock().push(entry, buf)
     }
 
@@ -200,7 +200,7 @@ impl Log {
             idx,
             start_id,
             end_excl,
-            seg_iter: SegIterState::Buf(BytesMut::new()),
+            seg_iter: SegIterState::Buf(Vec::new()),
             dirty: false,
         }
     }
@@ -208,12 +208,12 @@ impl Log {
 
 enum SegIterState {
     Empty,
-    Buf(BytesMut),
+    Buf(Vec<u8>),
     Iter(SegIter)
 }
 
 impl SegIterState {
-    pub fn take_buf(&mut self) -> Option<BytesMut> {
+    pub fn take_buf(&mut self) -> Option<Vec<u8>> {
         if let SegIterState::Buf(_) = self {
             if let SegIterState::Buf(v) = mem::replace(self, SegIterState::Empty) {
                 Some(v)
@@ -269,11 +269,11 @@ impl Iter {
         self.seg_iter.iter().expect("wrong state")
     }
 
-    pub fn buf(&self) -> &BytesMut {
+    pub fn buf(&self) -> &Vec<u8> {
         self.segment_iter().buf()
     }
 
-    pub fn buf_mut(&mut self) -> &mut BytesMut {
+    pub fn buf_mut(&mut self) -> &mut Vec<u8> {
         self.segment_iter_mut().buf_mut()
     }
 
@@ -375,7 +375,7 @@ impl Inner {
             .ok_or(self.stable_start_idx)
     }
 
-    pub fn push(&mut self, entry: &mut BufEntry, buf: &mut BytesMut) -> Result<()> {
+    pub fn push(&mut self, entry: &mut BufEntry, buf: &mut impl BufMut) -> Result<()> {
         let entry_len = cast::u32(buf.len()).unwrap();
         if entry_len > self.max_segment_len {
             return Err(Error::new(ErrorId::PushEntryTooBig, format!(

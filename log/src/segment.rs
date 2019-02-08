@@ -319,7 +319,7 @@ impl Segment {
         self.max_timestamp
     }
 
-    pub fn push(&mut self, entry: &mut BufEntry, buf: &mut BytesMut) -> Result<()> {
+    pub fn push(&mut self, entry: &mut BufEntry, buf: &mut impl BufMut) -> Result<()> {
         assert!(self.file.file.len() + buf.len() as u64 <= HARD_MAX_SEGMENT_LEN as u64);
 
         entry.validate_body(buf, ValidBody {
@@ -337,7 +337,7 @@ impl Segment {
         let pos = self.len_bytes();
         self.last_pos = Some(pos);
 
-        self.file.file.writer().write_all(&buf[..]).wrap_err_id(ErrorId::Io)?;
+        self.file.file.writer().write_all(buf.as_slice()).wrap_err_id(ErrorId::Io)?;
 
         if entry.max_timestamp() > self.max_timestamp {
             self.max_timestamp = entry.max_timestamp();
@@ -481,7 +481,7 @@ pub struct Iter {
     // Thus before reading next entry it has to skip the unread part of the frame.
     frame_len: Option<usize>,
     eof: bool,
-    buf: BytesMut,
+    buf: Vec<u8>,
     file_grow_check: Option<u64>,
     last_pos: Option<u32>,
 }
@@ -496,13 +496,13 @@ impl Iter {
             end_id_excl,
             frame_len: None,
             eof: force_eof,
-            buf: BytesMut::new(),
+            buf: Vec::new(),
             file_grow_check: None,
             last_pos: None,
         }
     }
 
-    pub fn with_buf(mut self, buf: BytesMut) -> Self {
+    pub fn with_buf(mut self, buf: Vec<u8>) -> Self {
         self.buf = buf;
         self.buf.clear();
         self
@@ -512,15 +512,15 @@ impl Iter {
         self.eof
     }
 
-    pub fn buf(&self) -> &BytesMut {
+    pub fn buf(&self) -> &Vec<u8> {
         &self.buf
     }
 
-    pub fn buf_mut(&mut self) -> &mut BytesMut {
+    pub fn buf_mut(&mut self) -> &mut Vec<u8> {
         &mut self.buf
     }
 
-    pub fn into_buf(self) -> BytesMut {
+    pub fn into_buf(self) -> Vec<u8> {
         self.buf
     }
 
@@ -537,7 +537,7 @@ impl Iter {
 
     pub fn complete_read(&mut self) -> Result<()> {
         if let Some(frame_len) = self.frame_len {
-            self.buf.set_len(frame_len);
+            self.buf.set_len_zeroed(frame_len);
             let r = self.rd.read_exact(&mut self.buf[format::FRAME_PROLOG_LEN..frame_len])
                 .wrap_err_id(ErrorId::Io);
             if r.is_ok() {

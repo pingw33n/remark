@@ -102,7 +102,7 @@ pub struct BufEntry {
 const MAX_ENTRY_LEN: usize = 1024 * 1024 * 1024;
 
 impl BufEntry {
-    fn read_frame_buf(rd: &mut impl FileRead, buf: &mut BytesMut, prolog_only: bool) -> Result<bool> {
+    fn read_frame_buf(rd: &mut impl FileRead, buf: &mut impl GrowableBuf, prolog_only: bool) -> Result<bool> {
         if rd.available() < format::FRAME_PROLOG_FIXED_LEN as u64 {
             return Ok(false);
         }
@@ -120,15 +120,16 @@ impl BufEntry {
             len
         };
 
-        buf.set_len(read_len);
-        format::FRAME_LEN.set(&mut buf[..], len as u32);
-        rd.read_exact(&mut buf[format::FRAME_LEN.next..read_len])
+        buf.set_len_zeroed(read_len);
+        format::FRAME_LEN.set(buf.as_mut_slice(), len as u32);
+        rd.read_exact(&mut buf.as_mut_slice()[format::FRAME_LEN.next..read_len])
             .wrap_err_id(ErrorId::Io)?;
 
         Ok(true)
     }
 
-    fn read0(rd: &mut impl FileRead, buf: &mut BytesMut, prolog_only: bool) -> Result<Option<Self>> {
+    fn read0(rd: &mut impl FileRead, buf: &mut impl GrowableBuf,
+            prolog_only: bool) -> Result<Option<Self>> {
         if Self::read_frame_buf(rd, buf, prolog_only)? {
             Self::decode(buf)
         } else {
@@ -136,11 +137,11 @@ impl BufEntry {
         }
     }
 
-    pub fn read_full(rd: &mut impl FileRead, buf: &mut BytesMut) -> Result<Option<Self>> {
+    pub fn read_full(rd: &mut impl FileRead, buf: &mut impl GrowableBuf) -> Result<Option<Self>> {
         Self::read0(rd, buf, false)
     }
 
-    pub fn read_prolog(rd: &mut impl FileRead, buf: &mut BytesMut) -> Result<Option<Self>> {
+    pub fn read_prolog(rd: &mut impl FileRead, buf: &mut impl GrowableBuf) -> Result<Option<Self>> {
         Self::read0(rd, buf, true)
     }
 
@@ -288,7 +289,7 @@ impl BufEntry {
         self.message_count
     }
 
-    pub fn update(&mut self, buf: &mut BytesMut, update: Update) {
+    pub fn update(&mut self, buf: &mut impl BufMut, update: Update) {
         let mut dirty = false;
         let buf = buf.as_mut_slice();
         if_chain! {
@@ -449,7 +450,7 @@ impl<T: Buf> Iterator for BufEntryIter<Cursor<T>> {
 
 pub struct BufEntryBuilder {
     compression: Codec,
-    encoder: Option<Encoder<Cursor<BytesMut>>>,
+    encoder: Option<Encoder<Cursor<Vec<u8>>>>,
     start_id: Option<Id>,
     end_id: Option<Id>,
     next_id: Id,
@@ -572,9 +573,8 @@ impl BufEntryBuilder {
 
         if self.encoder.is_none() {
             let estimated_len = format::FRAME_PROLOG_LEN + msg_wr.encoded_len();
-            let mut buf = BytesMut::new();
-            buf.ensure_capacity(estimated_len);
-            buf.ensure_len(format::FRAME_PROLOG_LEN);
+            let mut buf = Vec::with_capacity(estimated_len);
+            buf.ensure_len_zeroed(format::FRAME_PROLOG_LEN);
 
             let mut cursor = Cursor::new(buf);
             cursor.set_position(format::MESSAGES_START);
@@ -600,12 +600,12 @@ impl BufEntryBuilder {
         cast::u32(id_range.1 - id_range.0).unwrap()
     }
 
-    pub fn build(mut self) -> (BufEntry, BytesMut) {
+    pub fn build(mut self) -> (BufEntry, Vec<u8>) {
         let id_range = self.get_id_range().expect("can't build dense entry without messages");
         let mut buf = self.encoder.take().map(|e| e.finish()
             .expect("error finishing encoder")
             .into_inner())
-            .unwrap_or_else(|| BytesMut::new());
+            .unwrap_or_else(|| Vec::new());
         let (header_checksum, body_checksum) = self.fill_prolog(&mut buf, id_range);
         let frame_len = buf.len();
         (BufEntry {
@@ -627,10 +627,11 @@ impl BufEntryBuilder {
     }
 
     /// Returns (header_checksum, body_checksum).
-    fn fill_prolog(&self, buf: &mut BytesMut, id_range: (Id, Id)) -> (u32, u32) {
+    fn fill_prolog(&self, buf: &mut impl GrowableBuf, id_range: (Id, Id)) -> (u32, u32) {
         use format::*;
 
-        buf.ensure_len(format::FRAME_PROLOG_LEN);
+        buf.ensure_len_zeroed(format::FRAME_PROLOG_LEN);
+        let buf = buf.as_mut_slice();
 
         let len = cast::u32(buf.len()).unwrap();
         FRAME_LEN.set(buf, len);
@@ -644,8 +645,8 @@ impl BufEntryBuilder {
         TERM.set(buf, self.term);
         MESSAGE_COUNT.set(buf, self.message_count);
 
-        let header_checksum = Self::set_header_checksum(buf.as_mut_slice());
-        let body_checksum = Self::set_body_checksum(buf.as_mut_slice());
+        let header_checksum = Self::set_header_checksum(buf);
+        let body_checksum = Self::set_body_checksum(buf);
 
         (header_checksum, body_checksum)
     }

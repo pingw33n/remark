@@ -1,8 +1,6 @@
 pub use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use std::io::{self, SeekFrom};
 use std::io::prelude::*;
-use std::sync::Arc;
-use std::ops;
 use std::cmp;
 
 macro_rules! impl_get {
@@ -40,136 +38,24 @@ pub trait Buf: AsRef<[u8]>  {
 
 impl<T: AsRef<[u8]>> Buf for T {}
 
-
-#[derive(Clone)]
-pub struct Bytes {
-    range: ops::Range<usize>,
-    vec: Arc<Vec<u8>>,
-}
-
-impl Bytes {
-    pub fn new() -> Self {
-        Self {
-            range: 0..0,
-            vec: Arc::new(Vec::new()),
-        }
-    }
-}
-
-impl AsRef<[u8]> for Bytes {
-    fn as_ref(&self) -> &[u8] {
-        &self.vec[self.range.start..self.range.end]
-    }
-}
-
-impl ops::Deref for Bytes {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        self.as_slice()
-    }
-}
-
-impl Default for Bytes {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl From<Vec<u8>> for Bytes {
-    fn from(v: Vec<u8>) -> Self {
-        Self {
-            range: 0..v.len(),
-            vec: Arc::new(v),
-        }
-    }
-}
-
-impl From<BytesMut> for Bytes {
-    fn from(v: BytesMut) -> Self {
-        v.vec.into()
-    }
-}
-
-#[derive(Default)]
-pub struct BytesMut {
-    vec: Vec<u8>,
-}
-
 macro_rules! impl_set {
     ($s:ident, $w:ident: $ty:ty) => {
-        pub fn $s<B: ByteOrder>(&mut self, i: usize, v: $ty) {
-            B::$w(&mut self.vec[i..], v);
+        fn $s<B: ByteOrder>(&mut self, i: usize, v: $ty) {
+            B::$w(&mut self.as_mut_slice()[i..], v);
         }
     };
 }
 
-impl BytesMut {
-    pub fn new() -> Self {
-        Default::default()
+pub trait BufMut: Buf + AsMut<[u8]> {
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        self.as_mut()
     }
 
-    pub fn with_len(len: usize) -> Self {
-        let mut vec = Vec::with_capacity(len);
-        vec.resize(len, 0);
-        vec.into()
-    }
-
-    pub fn with_capacity(capacity: usize) -> Self {
-        Vec::with_capacity(capacity).into()
-    }
-
-    pub fn capacity(&self) -> usize {
-        self.vec.capacity()
-    }
-
-    pub fn reserve(&mut self, extra_capacity: usize) {
-        self.vec.reserve(extra_capacity);
-    }
-
-    pub fn ensure_capacity(&mut self, min_capacity: usize) {
-        if min_capacity > self.vec.capacity() {
-            let extra = min_capacity - self.vec.capacity();
-            self.vec.reserve(extra);
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        self.vec.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.vec.is_empty()
-    }
-
-    pub fn grow(&mut self, extra_len: usize) {
-        let new_len = self.vec.len().checked_add(extra_len).unwrap();
-        self.vec.resize(new_len, 0);
-    }
-
-    pub fn ensure_len(&mut self, min_len: usize) {
-        if self.len() < min_len {
-            self.vec.resize(min_len, 0);
-        }
-    }
-
-    pub fn set_len(&mut self, len: usize) {
-        self.vec.resize(len, 0);
-    }
-
-    pub fn clear(&mut self) {
-        self.vec.clear();
-    }
-
-    pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        &mut self.vec
-    }
-
-    pub fn set_u8(&mut self, i: usize, v: u8) {
+    fn set_u8(&mut self, i: usize, v: u8) {
         self.as_mut_slice()[i] = v;
     }
 
-    pub fn set_i8(&mut self, i: usize, v: i8) {
+    fn set_i8(&mut self, i: usize, v: i8) {
         self.set_u8(i, v as u8);
     }
 
@@ -181,37 +67,69 @@ impl BytesMut {
     impl_set!(set_i64, write_i64: i64);
 }
 
-impl AsRef<[u8]> for BytesMut {
-    fn as_ref(&self) -> &[u8] {
-        &self.vec
-    }
+impl<T: Buf + AsMut<[u8]>> BufMut for T {}
+
+pub trait GrowableBuf: BufMut {
+    fn capacity(&self) -> usize;
+
+    fn reserve(&mut self, extra_capacity: usize);
+
+    fn ensure_capacity(&mut self, min_capacity: usize);
+
+    fn is_empty(&self) -> bool;
+
+    fn grow(&mut self, extra_len: usize);
+
+    fn ensure_len_zeroed(&mut self, min_len: usize);
+
+    fn set_len_zeroed(&mut self, len: usize);
+
+    fn clear(&mut self);
+
+    fn extend_from_slice(&mut self, other: &[u8]);
 }
 
-impl AsMut<[u8]> for BytesMut {
-    fn as_mut(&mut self) -> &mut [u8] {
-        self.as_mut_slice()
+impl GrowableBuf for Vec<u8> {
+    fn capacity(&self) -> usize {
+        self.capacity()
     }
-}
 
-impl ops::Deref for BytesMut {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        self.as_slice()
+    fn reserve(&mut self, extra_capacity: usize) {
+        self.reserve(extra_capacity);
     }
-}
 
-impl ops::DerefMut for BytesMut {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.as_mut_slice()
-    }
-}
-
-impl From<Vec<u8>> for BytesMut {
-    fn from(vec: Vec<u8>) -> Self {
-        Self {
-            vec,
+    fn ensure_capacity(&mut self, min_capacity: usize) {
+        if min_capacity > self.capacity() {
+            let extra = min_capacity - self.capacity();
+            self.reserve(extra);
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.is_empty()
+    }
+
+    fn grow(&mut self, extra_len: usize) {
+        let new_len = self.len().checked_add(extra_len).unwrap();
+        self.resize(new_len, 0);
+    }
+
+    fn ensure_len_zeroed(&mut self, min_len: usize) {
+        if self.len() < min_len {
+            self.resize(min_len, 0);
+        }
+    }
+
+    fn set_len_zeroed(&mut self, len: usize) {
+        self.resize(len, 0);
+    }
+
+    fn clear(&mut self) {
+        self.clear();
+    }
+
+    fn extend_from_slice(&mut self, other: &[u8]) {
+        self.extend_from_slice(other);
     }
 }
 
@@ -309,17 +227,17 @@ impl<T> Read for Cursor<T> where T: AsRef<[u8]> {
     }
 }
 
-fn bytes_mut_write(bytes: &mut BytesMut, mut buf: &[u8], pos: &mut usize) -> io::Result<usize> {
+fn growable_buf_write(dst: &mut impl GrowableBuf, mut buf: &[u8], pos: &mut usize) -> io::Result<usize> {
     let mut p = *pos;
-    if p < bytes.len() {
-        let len = cmp::min(bytes.len() - p, buf.len());
-        let dst = &mut bytes[p..p + len];
+    if p < dst.len() {
+        let len = cmp::min(dst.len() - p, buf.len());
+        let dst = &mut dst.as_mut_slice()[p..p + len];
         dst.copy_from_slice(&buf[..len]);
         buf = &buf[len..];
         p += len;
     }
     if buf.len() > 0 {
-        bytes.vec.extend_from_slice(buf);
+        dst.extend_from_slice(buf);
         p += buf.len();
     }
 
@@ -329,17 +247,17 @@ fn bytes_mut_write(bytes: &mut BytesMut, mut buf: &[u8], pos: &mut usize) -> io:
     Ok(written)
 }
 
-impl Write for Cursor<&mut BytesMut> {
+impl Write for Cursor<&mut Vec<u8>> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        bytes_mut_write(self.inner, buf, &mut self.pos)
+        growable_buf_write(self.inner, buf, &mut self.pos)
     }
 
     fn flush(&mut self) -> io::Result<()> { Ok(()) }
 }
 
-impl Write for Cursor<BytesMut> {
+impl<T: GrowableBuf> Write for Cursor<T> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        bytes_mut_write(&mut self.inner, buf, &mut self.pos)
+        growable_buf_write(&mut self.inner, buf, &mut self.pos)
     }
 
     fn flush(&mut self) -> io::Result<()> { Ok(()) }
@@ -352,14 +270,24 @@ mod test {
     #[cfg(test)]
     mod cursor {
         use super::*;
+        use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 
         #[test]
         fn write() {
-            let b: BytesMut = vec![1, 2, 3, 4, 5].into();
+            let b: Vec<u8> = vec![1, 2, 3, 4, 5].into();
             let mut c = Cursor::new(b);
             c.set_position(2);
             assert_eq!(c.write(&[6, 7, 8, 9, 10]).unwrap(), 5);
             assert_eq!(c.get_ref().as_slice(), &[1, 2, 6, 7, 8, 9, 10]);
+        }
+
+        #[test]
+        fn mut_ref() {
+            let mut buf = Vec::new();
+            let mut c = Cursor::new(&mut buf);
+            c.write_u32::<BigEndian>(12345).unwrap();
+            c.set_position(0);
+            assert_eq!(c.read_u32::<BigEndian>().unwrap(), 12345);
         }
     }
 }

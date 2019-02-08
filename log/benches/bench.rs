@@ -37,7 +37,7 @@ fn bench(c: &mut Criterion) {
     });
 
     fn create_compressed_entry(codec: remark_log::entry::Codec) -> (remark_log::entry::BufEntry,
-            remark_log::bytes::BytesMut) {
+            Vec<u8>) {
         use remark_log::entry::BufEntryBuilder;
         use remark_log::message::*;
 

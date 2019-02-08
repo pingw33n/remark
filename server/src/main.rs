@@ -8,7 +8,7 @@ use std::io::prelude::*;
 
 use remark_log::entry::{BufEntry, BufEntryBuilder};
 use remark_log::error::{ErrorId, Result};
-use remark_log::bytes::BytesMut;
+use remark_log::bytes::*;
 use remark_log::log::Log;
 use remark_log::message::MessageBuilder;
 use remark_proto::*;
@@ -47,7 +47,7 @@ impl Server {
     }
 
     pub fn push(&mut self, request: &push::Request,
-            entries: &mut [(BufEntry, BytesMut)]) -> push::Response {
+            entries: &mut [(BufEntry, Vec<u8>)]) -> push::Response {
         use remark_proto::common::{self, Status};
         use remark_proto::push::*;
 
@@ -129,8 +129,8 @@ fn main() {
                     let mut entries = Vec::new();
                     for _ in 0..req.entries.len() {
                         let len = stream.read_u32::<BigEndian>().unwrap();
-                        let mut buf = BytesMut::new();
-                        buf.ensure_len(len as usize);
+                        let mut buf = Vec::new();
+                        buf.ensure_len_zeroed(len as usize);
                         BigEndian::write_u32(buf.as_mut_slice(), len);
                         stream.read_exact(&mut buf.as_mut_slice()[4..]).unwrap();
                         let entry = BufEntry::decode(&buf).unwrap().unwrap();
