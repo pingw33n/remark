@@ -1,5 +1,10 @@
 #[macro_use] extern crate prost_derive;
 
+mod root {
+    include!(concat!(env!("OUT_DIR"), "/proto.rs"));
+}
+pub use root::*;
+
 pub mod common {
     include!(concat!(env!("OUT_DIR"), "/common.rs"));
 }

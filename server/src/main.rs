@@ -5,12 +5,15 @@ extern crate remark_proto as rproto;
 use byteorder::{BigEndian, ByteOrder, ReadBytesExt, WriteBytesExt};
 use bytes::{Buf, BufMut};
 use if_chain::if_chain;
-use prost::Message;
+use prost::{Message as PMessage};
 use std::collections::HashMap;
 use std::net::TcpListener;
+use std::io;
 use std::io::prelude::*;
 
 use rcommon::bytes::*;
+use rcommon::error::*;
+use rcommon::varint::{self, ReadExt, WriteExt};
 use rlog::entry::{BufEntry, BufEntryBuilder};
 use rlog::error::{ErrorId, Result};
 use rlog::log::Log;
@@ -90,7 +93,39 @@ impl Server {
     }
 }
 
+fn read_pb_frame<M: Default + PMessage, R: Read>(rd: &mut R) -> io::Result<M> {
+    let len = rd.read_u32_varint()?;
+    let mut buf = Vec::new();
+    buf.ensure_len_zeroed(len as usize);
+    rd.read_exact(&mut buf)?;
+
+    M::decode(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData,
+        format!("malformed protobuf data: {}", e)))
+}
+
+fn write_pb_frame(wr: &mut Write, msg: impl PMessage) -> io::Result<usize> {
+    let len = msg.encoded_len();
+    let mut buf = Vec::new();
+    buf.reserve_exact(varint::encoded_len(len as u64) as usize + len);
+    buf.write_u32_varint(len as u32)?;
+    msg.encode(&mut buf).unwrap();
+    wr.write_all(&buf)?;
+    Ok(len)
+}
+
+fn read_entries(rd: &mut impl Read, count: usize) -> Result<Vec<(BufEntry, Vec<u8>)>> {
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        let mut buf = Vec::new();
+        let entry = BufEntry::read_full(rd, &mut buf)?.ok_or_else(||
+            Error::new(rlog::entry::ErrorId::Io, "entries truncated"))?;
+        entries.push((entry, buf));
+    }
+    Ok(entries)
+}
+
 fn main() {
+    env_logger::init();
     let push = push::Request {
         entries: vec![
             push::request::Entry {
@@ -116,32 +151,29 @@ fn main() {
     for stream in l.incoming() {
         match stream {
             Ok(mut stream) => {
+                let stream = &mut stream;
                 println!("new connectoin: {}", stream.peer_addr().unwrap());
 
                 loop {
+                    let req = Request::default();
                     measure_time::print_time!("");
-                    let len = match stream.read_u32::<BigEndian>() {
+                    let req = match read_pb_frame::<Request, _>(stream) {
                         Ok(v) => v,
-                        Err(_) => break,
+                        Err(e) => {
+                            dbg!(e);
+                            break;
+                        }
                     };
-                    let mut buf = Vec::new();
-                    buf.resize(len as usize, 0);
-                    stream.read_exact(&mut buf).unwrap();
 
-                    let req = push::Request::decode(&buf).unwrap();
-
-                    let mut entries = Vec::new();
-                    for _ in 0..req.entries.len() {
-                        let mut buf = Vec::new();
-                        let entry = BufEntry::read_full(&mut stream, &mut buf).unwrap().unwrap();
-                        entries.push((entry, buf));
+                    match req.request.unwrap() {
+                        request::Request::Push(req) => {
+                            let mut entries = read_entries(stream, req.entries.len()).unwrap();
+                            let resp = server.push(&req, &mut entries);
+                            write_pb_frame(stream, Response { response: Some(response::Response::Push(resp)) }).unwrap();
+                        }
                     }
 
-                    let resp = server.push(&req, &mut entries);
-                    let mut buf = Vec::new();
-                    buf.write_u32::<BigEndian>(resp.encoded_len() as u32).unwrap();
-                    resp.encode(&mut buf).unwrap();
-                    stream.write_all(&buf).unwrap();
+
                 }
             }
             Err(e) => {

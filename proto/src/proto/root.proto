@@ -1,0 +1,17 @@
+syntax = "proto3";
+package proto;
+
+import "common.proto";
+import "push.proto";
+
+message Request {
+    oneof request {
+        push.Request push = 1;
+    }
+}
+
+message Response {
+    oneof response {
+        push.Response push = 1;
+    }
+}
