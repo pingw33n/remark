@@ -11,6 +11,7 @@ use std::result::{Result as StdResult};
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use crate::segment::Push;
 
 use crate::entry::BufEntry;
 use crate::entry::format::MIN_FRAME_LEN;
@@ -166,8 +167,9 @@ impl Log {
         })
     }
 
-    pub fn push(&self, entry: &mut BufEntry, buf: &mut impl GrowableBuf) -> Result<()> {
-        self.inner.lock().push(entry, buf)
+    pub fn push(&self, entry: &mut BufEntry, buf: &mut impl GrowableBuf,
+            options: Push) -> Result<()> {
+        self.inner.lock().push(entry, buf, options)
     }
 
     pub fn roll_over_if_idle(&self, max_idle: Duration, now: Timestamp) -> Result<bool> {
@@ -376,7 +378,8 @@ impl Inner {
             .ok_or(self.stable_start_idx)
     }
 
-    pub fn push(&mut self, entry: &mut BufEntry, buf: &mut impl BufMut) -> Result<()> {
+    pub fn push(&mut self, entry: &mut BufEntry, buf: &mut impl BufMut,
+            options: Push) -> Result<()> {
         let entry_len = cast::u32(buf.len()).unwrap();
         if entry_len > self.max_segment_len {
             return Err(Error::new(ErrorId::PushEntryTooBig, format!(
@@ -386,7 +389,7 @@ impl Inner {
 
         self.roll_over_if_max_len(entry_len)?;
 
-        self.segments.back_mut().unwrap().push(entry, buf)
+        self.segments.back_mut().unwrap().push(entry, buf, options)
     }
 
     pub fn roll_over_if_idle(&mut self, max_idle: Duration, now: Timestamp) -> Result<bool> {
@@ -502,11 +505,11 @@ mod test {
         }).unwrap();
         assert_eq!(log.inner.lock().segments.len(), 1);
 
-        log.push(e, buf).unwrap();
+        log.push(e, buf, Default::default()).unwrap();
         assert_eq!(log.inner.lock().segments.len(), 1);
 
         let (ref mut e, ref mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
-        log.push(e, buf).unwrap();
+        log.push(e, buf, Default::default()).unwrap();
         assert_eq!(log.inner.lock().segments.len(), 2);
         assert_eq!(log.inner.lock().segments[0].len_bytes(), buf.len().to_u32().unwrap());
         assert_eq!(log.inner.lock().segments[1].len_bytes(), buf.len().to_u32().unwrap());
@@ -522,9 +525,12 @@ mod test {
         assert_eq!(log.inner.lock().segments.len(), 1);
 
         let (ref mut e, ref mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
-        log.push(e, buf).unwrap();
+        let now = Timestamp::now();
+        log.push(e, buf, Push { timestamp: Some(now), ..Default::default() }).unwrap();
         assert_eq!(log.inner.lock().segments.len(), 1);
-        assert!(log.roll_over_if_idle(Duration::from_millis(0), e.max_timestamp() + 1).unwrap());
+        assert!(!log.roll_over_if_idle(Duration::from_millis(1), now + 1).unwrap());
+        assert_eq!(log.inner.lock().segments.len(), 1);
+        assert!(log.roll_over_if_idle(Duration::from_millis(1), now + 2).unwrap());
         assert_eq!(log.inner.lock().segments.len(), 2);
         assert_eq!(log.inner.lock().segments[0].len_bytes(), buf.len().to_u32().unwrap());
         assert_eq!(log.inner.lock().segments[1].len_bytes(), 0);
@@ -563,7 +569,8 @@ mod test {
                     .collect();
 
                 let (mut e, mut buf) = BufEntryBuilder::from(msgs.clone()).build();
-                log.push(&mut e, &mut buf).unwrap();
+                log.push(&mut e, &mut buf, Push { timestamp: Some(Timestamp::now()),
+                    ..Default::default() }).unwrap();
 
                 entry_msgs.push(msgs.iter().cloned().map(|mut b| {
                     b.timestamp = Some(e.first_timestamp());
@@ -630,13 +637,13 @@ mod test {
             }).unwrap();
             for _ in 0..100 {
                 let (ref mut e, ref mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
-                log.push(e, buf).unwrap();
+                log.push(e, buf, Default::default()).unwrap();
             }
         }
         let log = Log::open_or_create(&dir, Default::default()).unwrap();
         for _ in 0..100 {
             let (ref mut e, ref mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
-            log.push(e, buf).unwrap();
+            log.push(e, buf, Default::default()).unwrap();
         }
     }
 }

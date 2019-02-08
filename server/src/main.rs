@@ -16,8 +16,8 @@ use rcommon::error::*;
 use rcommon::varint::{self, ReadExt, WriteExt};
 use rlog::entry::{BufEntry, BufEntryBuilder};
 use rlog::error::{ErrorId, Result};
-use rlog::log::Log;
-use rlog::message::MessageBuilder;
+use rlog::log::{self, Log};
+use rlog::message::{MessageBuilder, Timestamp};
 use rproto::*;
 
 #[global_allocator]
@@ -70,7 +70,17 @@ impl Server {
             let status = if let Some(topic) = self.topics.get_mut(&req_entry.topic_name) {
                 if let Some(shard) = topic.shards.get_mut(req_entry.shard_id as usize) {
                     measure_time::print_time!("push");
-                    match shard.log.push(entry, buf) {
+
+                    let timestamp = if request.flags & request::Flags::UseTimestamps as u32 != 0 {
+                        Some(Timestamp::now())
+                    } else {
+                        None
+                    };
+                    let options = log::Push {
+                        dense: true,
+                        timestamp,
+                    };
+                    match shard.log.push(entry, buf, options) {
                         Ok(()) => Status::Ok,
                         Err(e) => {
                             dbg!(e);
@@ -127,6 +137,7 @@ fn read_entries(rd: &mut impl Read, count: usize) -> Result<Vec<(BufEntry, Vec<u
 fn main() {
     env_logger::init();
     let push = push::Request {
+        flags: push::request::Flags::UseTimestamps as u32,
         entries: vec![
             push::request::Entry {
                 topic_name: "topic1".into(),
@@ -155,7 +166,6 @@ fn main() {
                 println!("new connectoin: {}", stream.peer_addr().unwrap());
 
                 loop {
-                    let req = Request::default();
                     measure_time::print_time!("");
                     let req = match read_pb_frame::<Request, _>(stream) {
                         Ok(v) => v,

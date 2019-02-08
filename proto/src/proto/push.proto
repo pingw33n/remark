@@ -4,11 +4,16 @@ package push;
 import "common.proto";
 
 message Request {
+    enum Flags {
+        NULL = 0;
+        USE_TIMESTAMPS = 0x1;
+    }
     message Entry {
         string topic_name = 1;
         uint32 shard_id = 2;
     }
-    repeated Entry entries = 1;
+    uint32 flags = 1;
+    repeated Entry entries = 2;
 }
 
 message Response {

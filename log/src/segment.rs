@@ -113,6 +113,21 @@ impl Default for Options {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct Push {
+    pub dense: bool,
+    pub timestamp: Option<Timestamp>,
+}
+
+impl Default for Push {
+    fn default() -> Self {
+        Self {
+            dense: true,
+            timestamp: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Mode {
     Open,
@@ -319,18 +334,21 @@ impl Segment {
         self.max_timestamp
     }
 
-    pub fn push(&mut self, entry: &mut BufEntry, buf: &mut impl BufMut) -> Result<()> {
+    pub fn push(&mut self, entry: &mut BufEntry, buf: &mut impl BufMut, options: Push) -> Result<()> {
         assert!(self.file.file.len() + buf.len() as u64 <= HARD_MAX_SEGMENT_LEN as u64);
 
         entry.validate_body(buf, ValidBody {
-            without_timestamp: true,
+            dense: options.dense,
+            without_timestamp: options.timestamp.is_some(),
             ..Default::default()
         }).context("validating body")?;
 
         entry.update(buf, Update {
-            start_id: Some(self.next_id),
-            first_timestamp: Some(Timestamp::now()),
+            start_id: if options.dense { Some(self.next_id) } else { None },
+            first_timestamp: options.timestamp,
         });
+
+        assert!(entry.start_id() >= self.start_id);
 
         self.next_id = entry.end_id() + 1;
 
@@ -633,31 +651,33 @@ mod test {
 
             // first entry
 
+            let timestamp1 = Timestamp::now() - 10000;
+
             let (mut entry, mut buf) = BufEntryBuilder::from(vec![
                 MessageBuilder {
+                    timestamp: Some(timestamp1),
                     value: Some("msg1".into()),
                     ..Default::default()
                 },
                 MessageBuilder {
+                    timestamp: Some(timestamp1 + 1),
                     value: Some("msg2".into()),
                     ..Default::default()
                 },
             ]).build();
-            entry.validate_body(&buf, ValidBody { without_timestamp: true, ..Default::default() }).unwrap();
-            seg.push(&mut entry, &mut buf).unwrap();
+            entry.validate_body(&buf, Default::default()).unwrap();
+            seg.push(&mut entry, &mut buf, Default::default()).unwrap();
 
             let mut it = seg.iter(..);
 
             let act_entry = it.next().unwrap().unwrap();
             it.complete_read().unwrap();
-            act_entry.validate_body(it.buf(), ValidBody { dense: true, ..Default::default() }).unwrap();
-
-            let timestamp = entry.first_timestamp();
+            act_entry.validate_body(it.buf(), Default::default()).unwrap();
 
             assert_eq!(act_entry.start_id(), Id::new(100));
             assert_eq!(act_entry.end_id(), Id::new(101));
-            assert_eq!(act_entry.first_timestamp(), timestamp);
-            assert_eq!(act_entry.max_timestamp(), timestamp);
+            assert_eq!(act_entry.first_timestamp(), timestamp1);
+            assert_eq!(act_entry.max_timestamp(), timestamp1 + 1);
 
             let act_msgs: Vec<_> = act_entry.iter(it.buf())
                 .map(|m| m.unwrap())
@@ -665,13 +685,13 @@ mod test {
             assert_eq!(act_msgs, vec![
                 MessageBuilder {
                     id: Some(Id::new(100)),
-                    timestamp: Some(timestamp),
+                    timestamp: Some(timestamp1),
                     value: Some("msg1".into()),
                     ..Default::default()
                 }.build(),
                 MessageBuilder {
                     id: Some(Id::new(101)),
-                    timestamp: Some(timestamp),
+                    timestamp: Some(timestamp1 + 1),
                     value: Some("msg2".into()),
                     ..Default::default()
                 }.build(),
@@ -687,7 +707,10 @@ mod test {
                     ..Default::default()
                 },
             ]).build();
-            seg.push(&mut entry, &mut buf).unwrap();
+            entry.validate_body(&buf, ValidBody { without_timestamp: true,
+                ..Default::default() }).unwrap();
+            seg.push(&mut entry, &mut buf, Push { timestamp: Some(Timestamp::now()),
+                ..Default::default() }).unwrap();
             let timestamp = entry.first_timestamp();
             assert_eq!(entry.start_id(), Id::new(102));
             assert_eq!(entry.end_id(), Id::new(102));
@@ -723,8 +746,8 @@ mod test {
         }).unwrap();
 
         let (mut entry, mut buf) = BufEntryBuilder::sparse(
-            Id::new(1), Id::new(1)).build();
-        seg.push(&mut entry, &mut buf).unwrap();
+            Id::new(10), Id::new(11)).build();
+        seg.push(&mut entry, &mut buf, Push { dense: false, ..Default::default() }).unwrap();
         assert_eq!(seg.id_index.entry_by_key(10), None);
 
         let mut b = BufEntryBuilder::dense();
@@ -733,8 +756,8 @@ mod test {
         }
         let (mut entry, mut buf) = b.build();
         let pos = seg.len_bytes();
-        seg.push(&mut entry, &mut buf).unwrap();
-        assert_eq!(seg.id_index.entry_by_key(1), Some((1, pos)));
+        seg.push(&mut entry, &mut buf, Default::default()).unwrap();
+        assert_eq!(seg.id_index.entry_by_key(12), Some((2, pos)));
     }
 
     #[test]
@@ -758,7 +781,7 @@ mod test {
             let mut seg = Segment::create_new(&dir, Id::min_value(), Timestamp::min_value(),
                 Default::default()).unwrap();
             let (mut entry, mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
-            seg.push(&mut entry, &mut buf).unwrap();
+            seg.push(&mut entry, &mut buf, Default::default()).unwrap();
             (seg.path().clone(), seg.len_bytes())
         };
 
@@ -780,12 +803,12 @@ mod test {
         let (mut entry, mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
         assert_eq!(seg.last_pos(), None);
 
-        seg.push(&mut entry, &mut buf).unwrap();
+        seg.push(&mut entry, &mut buf, Default::default()).unwrap();
         assert_eq!(seg.last_pos(), Some(0));
         let expected_last_pos = seg.len_bytes();
 
         let (mut entry, mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
-        seg.push(&mut entry, &mut buf).unwrap();
+        seg.push(&mut entry, &mut buf, Default::default()).unwrap();
         assert!(seg.len_bytes() > expected_last_pos);
         assert_eq!(seg.last_pos(), Some(expected_last_pos));
         assert!(seg.id_index.is_empty());
@@ -812,15 +835,14 @@ mod test {
     #[test]
     fn takes_next_id_and_max_timestamp_from_index() {
         let dir = mktemp::Temp::new_dir().unwrap();
-        let timestamp;
+        let timestamp = Timestamp::now();
         let path;
         {
             let mut seg = Segment::create_new(&dir, Id::min_value(), Timestamp::min_value(),
                 Default::default()).unwrap();
             path = seg.path().clone();
             let (ref mut e, ref mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
-            seg.push(e, buf).unwrap();
-            timestamp = e.first_timestamp();
+            seg.push(e, buf, Push { timestamp: Some(timestamp), ..Default::default() }).unwrap();
 
             seg.make_read_only().unwrap();
 
