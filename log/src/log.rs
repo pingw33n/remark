@@ -123,15 +123,16 @@ impl Log {
                 }
             }
 
+            segment_paths.sort();
+
             let mut segments = Vec::with_capacity(segment_paths.len());
-            for path in &segment_paths {
+            for (i, path) in segment_paths.iter().enumerate() {
                 let segment = Segment::open(path, segment::Options {
-                    read_only: true,
+                    read_only: i < segment_paths.len() - 1,
                     .. Default::default()
                 }).context_with(|_| format!("opening segment {:?}", path))?;
                 segments.push(segment);
             }
-            segments.sort_by_key(|s| s.start_id());
 
             for (i, segment) in segments.iter().enumerate() {
                 if i > 0 && segment.max_timestamp() < segments[i - 1].max_timestamp() {
@@ -616,6 +617,25 @@ mod test {
                 assert_eq!(&act_entries[i - idx_range.0], &entries[i]);
                 assert_eq!(&act_entry_msgs[i - idx_range.0], &entry_msgs[i]);
             }
+        }
+    }
+
+    #[test]
+    fn reopen() {
+        let dir = mktemp::Temp::new_dir().unwrap();
+        {
+            let log = Log::open_or_create(&dir, Options {
+                max_segment_len: 500,
+            }).unwrap();
+            for _ in 0..100 {
+                let (ref mut e, ref mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
+                log.push(e, buf).unwrap();
+            }
+        }
+        let log = Log::open_or_create(&dir, Default::default()).unwrap();
+        for _ in 0..100 {
+            let (ref mut e, ref mut buf) = BufEntryBuilder::from(MessageBuilder::default()).build();
+            log.push(e, buf).unwrap();
         }
     }
 }
