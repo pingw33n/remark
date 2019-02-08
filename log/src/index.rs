@@ -474,8 +474,6 @@ mod test {
 
     #[test]
     fn threaded() {
-        env_logger::init();
-
         use rand::Rng;
         use std::thread;
         use crate::util::test_common::thread_rng;
