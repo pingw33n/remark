@@ -180,7 +180,7 @@ fn read_varint<R: ?Sized + io::Read>(rd: &mut R, max_len: u32) -> io::Result<u64
 
 pub trait ReadExt: io::Read {
     fn read_u16_varint(&mut self) -> io::Result<u16> {
-        read_varint(self, 2).map(|v| v as u16)
+        read_varint(self, 3).map(|v| v as u16)
     }
 
     fn read_i16_varint(&mut self) -> io::Result<i16> {
@@ -188,7 +188,7 @@ pub trait ReadExt: io::Read {
     }
 
     fn read_u32_varint(&mut self) -> io::Result<u32> {
-        read_varint(self, 4).map(|v| v as u32)
+        read_varint(self, 5).map(|v| v as u32)
     }
 
     fn read_i32_varint(&mut self) -> io::Result<i32> {
@@ -196,7 +196,7 @@ pub trait ReadExt: io::Read {
     }
 
     fn read_u64_varint(&mut self) -> io::Result<u64> {
-        read_varint(self, 8).map(|v| v as u64)
+        read_varint(self, 10).map(|v| v as u64)
     }
 
     fn read_i64_varint(&mut self) -> io::Result<i64> {
@@ -272,6 +272,21 @@ mod test {
     zigzag_test!(encode_decode_zigzag_i32, encode_zigzag_i32, decode_zigzag_i32, i32 => u32);
     zigzag_test!(encode_decode_zigzag_i64, encode_zigzag_i64, decode_zigzag_i64, i64 => u64);
 
+    fn read<T, F>(buf: &[u8], f: F) -> (T, usize)
+        where F: FnOnce(&mut io::Read) -> io::Result<T>
+    {
+        let mut cur = io::Cursor::new(buf);
+        let v = f(&mut cur).unwrap();
+        (v, cur.position() as usize)
+    }
+
+    fn write(f: impl FnOnce(&mut io::Write) -> io::Result<usize>) -> Vec<u8> {
+        let mut vec = Vec::new();
+        f(&mut vec).unwrap();
+        vec
+    }
+
+
     #[test]
     fn encode_decode_u16() {
         let d = &[
@@ -287,6 +302,9 @@ mod test {
         for &(v, enc, len) in d {
             assert_eq!(encode_u16(v), (enc, len));
             assert_eq!(decode_u16(&enc[..]), (v, len), "{:?}", enc);
+
+            assert_eq!(read(&enc[..len], |mut r| r.read_u16_varint()), (v, len));
+            assert_eq!(write(|mut w| w.write_u16_varint(v)), enc[..len].to_vec());
         }
     }
 
@@ -307,6 +325,9 @@ mod test {
         for &(v, enc, len) in d {
             assert_eq!(encode_u32(v), (enc, len));
             assert_eq!(decode_u32(&enc[..]), (v, len), "{:?}", enc);
+
+            assert_eq!(read(&enc[..len], |mut r| r.read_u32_varint()), (v, len));
+            assert_eq!(write(|mut w| w.write_u32_varint(v)), enc[..len].to_vec());
         }
     }
 
@@ -325,6 +346,9 @@ mod test {
         for &(v, enc, len) in d {
             assert_eq!(encode_u64(v), (enc, len), "{:?}", enc);
             assert_eq!(decode_u64(&enc[..]), (v, len), "{:?}", enc);
+
+            assert_eq!(read(&enc[..len], |mut r| r.read_u64_varint()), (v, len));
+            assert_eq!(write(|mut w| w.write_u64_varint(v)), enc[..len].to_vec());
         }
     }
 }
