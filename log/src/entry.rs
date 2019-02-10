@@ -1,4 +1,4 @@
-pub mod format;
+pub(in crate) mod format;
 
 use byteorder::{BigEndian, ReadBytesExt};
 use if_chain::if_chain;

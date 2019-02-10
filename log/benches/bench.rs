@@ -89,7 +89,7 @@ fn bench(c: &mut Criterion) {
         let (_, buf) = create_compressed_entry(1, remark_log::entry::Codec::Uncompressed);
         let mut cur = Cursor::new(&buf);
         b.iter(|| {
-            cur.set_position(format::MESSAGES_START);
+            cur.set_position(55 /* format::MESSAGES_START */);
             Message::read(&mut cur, Id::new(0), Timestamp::epoch()).unwrap();
         });
     });
