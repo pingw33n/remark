@@ -468,6 +468,7 @@ fn set_file_len(file: &File, len: usize, committed: bool) -> Result<()> {
 mod test {
     use super::*;
     use super::ErrorId;
+    use rcommon::clone;
     use std::fs;
     use std::sync::Arc;
     use std::time::Duration;

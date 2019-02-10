@@ -41,6 +41,7 @@ impl Drop for FileMutex {
 #[cfg(test)]
 mod test {
     use super::*;
+    use rcommon::clone;
     use std::io::ErrorKind;
     use std::mem;
     use std::sync::{Arc, Mutex};

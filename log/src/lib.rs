@@ -5,9 +5,6 @@
 
 extern crate remark_common as rcommon;
 
-#[macro_use]
-mod macros;
-
 pub mod entry;
 pub mod error;
 pub mod file;
