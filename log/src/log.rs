@@ -589,7 +589,7 @@ mod test {
             while let Some(e) = it.next() {
                 let e = e.unwrap();
                 it.complete_read().unwrap();
-                entry_msgs.push(e.iter(it.buf()).map(|m| m.unwrap()).collect::<Vec<_>>());
+                entry_msgs.push(e.iter(it.buf()).map_to_message().map(|m| m.unwrap()).collect::<Vec<_>>());
                 entries.push(e);
             }
             (entries, entry_msgs)

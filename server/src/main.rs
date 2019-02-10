@@ -147,11 +147,13 @@ fn main() {
     };
 
     let mut b = BufEntryBuilder::dense();
-    b.compression(remark_log::entry::Codec::Lz4);
-    (0..100000)
-        .for_each(|i| { b.message(MessageBuilder { value: Some(format!("test {}", i).into()), ..Default::default() }); });
+//    b.compression(remark_log::entry::Codec::Lz4);
+    while b.get_frame_len() < 16384 {
+        b.message(MessageBuilder { value: Some(format!("test {}", b.get_frame_len()).into()), ..Default::default() });
+    }
+    dbg!(b.message_count());
     let (entry, buf) = b.build();
-    std::fs::File::create("/tmp/rementry_big.bin").unwrap().write_all(&buf).unwrap();
+    std::fs::File::create("/tmp/rementry.bin").unwrap().write_all(&buf).unwrap();
 
     BufEntry::decode(&buf).unwrap().unwrap().validate_body(&buf,
         remark_log::entry::ValidBody { dense: true, without_timestamp: true } ).unwrap();
@@ -164,9 +166,10 @@ fn main() {
             Ok(mut stream) => {
                 let stream = &mut stream;
                 println!("new connectoin: {}", stream.peer_addr().unwrap());
+                measure_time::print_time!("session");
 
                 loop {
-                    measure_time::print_time!("");
+                    measure_time::print_time!("req");
                     let req = match read_pb_frame::<Request, _>(stream) {
                         Ok(v) => v,
                         Err(e) => {
@@ -182,8 +185,6 @@ fn main() {
                             write_pb_frame(stream, Response { response: Some(response::Response::Push(resp)) }).unwrap();
                         }
                     }
-
-
                 }
             }
             Err(e) => {

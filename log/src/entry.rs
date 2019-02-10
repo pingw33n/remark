@@ -1,4 +1,4 @@
-pub(in crate) mod format;
+pub mod format;
 
 use byteorder::{BigEndian, ReadBytesExt};
 use if_chain::if_chain;
@@ -10,7 +10,7 @@ use std::mem;
 pub use crate::util::compress::Codec;
 
 use crate::error::*;
-use crate::message::{Id, Message, MessageBuilder, Timestamp};
+use crate::message::{BufMessage, Id, Message, MessageBuilder, Timestamp};
 use crate::util::compress::*;
 use rcommon::bytes::*;
 use rcommon::io::BoundedRead;
@@ -246,12 +246,12 @@ impl BufEntry {
         }))
     }
 
-    pub fn iter<T: Buf>(&self, buf: T) -> BufEntryIter<Cursor<T>> {
-        if self.message_count > 0 && buf.len() == format::FRAME_PROLOG_LEN {
-            panic!("`buf` seems to be incomplete, did you forget to call complete_read()?");
+    pub fn iter<T: Buf>(&self, entry_buf: T) -> BufEntryIter<Cursor<T>> {
+        if self.message_count > 0 && entry_buf.len() == format::FRAME_PROLOG_LEN {
+            panic!("`entry_buf` seems to be incomplete, did you forget to call complete_read()?");
         }
-        assert!(buf.len() >= self.frame_len);
-        let mut rd = Cursor::new(buf);
+        assert!(entry_buf.len() >= self.frame_len);
+        let mut rd = Cursor::new(entry_buf);
         rd.set_position(format::MESSAGES_START);
         BufEntryIter {
             next_id: self.start_id,
@@ -259,6 +259,7 @@ impl BufEntry {
             left: self.message_count,
             rd: ReadState::Init { rd, compression: self.compression },
             last_pos: None,
+            msg_buf: Vec::new(),
         }
     }
 
@@ -368,11 +369,10 @@ impl BufEntry {
             return Err(Error::without_details(ErrorId::WithoutTimestampRequired));
         }
 
-        let buf = &buf.as_slice()[..self.frame_len];
+        let entry_buf = &buf.as_slice()[..self.frame_len];
         let mut prev_id = self.start_id;
         let mut max_timestamp = None;
-        // TODO implement more efficient reading of message specifically for validation.
-        let mut it = self.iter(buf);
+        let mut it = self.iter(entry_buf);
         let mut i = 0;
         while i < self.message_count {
             let msg = if let Some(msg) = it.next() {
@@ -380,18 +380,18 @@ impl BufEntry {
             } else {
                 return Err(Error::without_details(BadBody::TooFewMessages));
             };
-            if i == 0 && msg.timestamp != self.first_timestamp {
+            if i == 0 && msg.timestamp() != self.first_timestamp {
                 return Err(Error::without_details(BadMessages::FirstTimestampMismatch));
             }
-            if options.dense && msg.id - prev_id != (i > 0) as u64 {
+            if options.dense && msg.id() - prev_id != (i > 0) as u64 {
                 return Err(Error::without_details(ErrorId::DenseRequired));
             }
-            if options.without_timestamp && msg.timestamp != self.first_timestamp {
+            if options.without_timestamp && msg.timestamp() != self.first_timestamp {
                 return Err(Error::without_details(ErrorId::WithoutTimestampRequired));
             }
-            prev_id = msg.id;
-            if max_timestamp.is_none() || msg.timestamp > max_timestamp.unwrap() {
-                max_timestamp = Some(msg.timestamp);
+            prev_id = msg.id();
+            if max_timestamp.is_none() || msg.timestamp() > max_timestamp.unwrap() {
+                max_timestamp = Some(msg.timestamp());
             }
             i += 1;
         }
@@ -417,6 +417,7 @@ pub struct BufEntryIter<R: BufRead> {
     left: u32,
     rd: ReadState<R>,
     last_pos: Option<u32>,
+    msg_buf: Vec<u8>,
 }
 
 impl<T: Buf> BufEntryIter<Cursor<T>> {
@@ -431,15 +432,39 @@ impl<T: Buf> BufEntryIter<Cursor<T>> {
             ReadState::Empty => unreachable!(),
         }
     }
+
+    pub fn msg_buf(&self) -> &Vec<u8> {
+        &self.msg_buf
+    }
+
+    pub fn map_to_message(self) -> impl Iterator<Item=Result<Message>> {
+        MapToMessage(self)
+    }
+
+    fn next_message(&mut self) -> Option<Result<Message>> {
+        Some(self.next()?.map(|m| m.to_message(&self.msg_buf)))
+    }
 }
 
-impl<T: Buf> Iterator for BufEntryIter<Cursor<T>> {
+struct MapToMessage<T: Buf>(BufEntryIter<Cursor<T>>);
+
+impl<T: Buf> Iterator for MapToMessage<T> {
     type Item = Result<Message>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next_message()
+    }
+}
+
+
+impl<T: Buf> Iterator for BufEntryIter<Cursor<T>> {
+    type Item = Result<BufMessage>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.left == 0 {
             return None;
         }
+        self.msg_buf.clear();
         if matches!(self.rd, ReadState::Init {..}) {
             if let ReadState::Init { rd, compression } = mem::replace(&mut self.rd, ReadState::Empty) {
                 let rd = Decoder::new(rd, compression);
@@ -457,16 +482,16 @@ impl<T: Buf> Iterator for BufEntryIter<Cursor<T>> {
             unreachable!()
         };
         let last_pos = rd.get_ref().position().to_u32().unwrap();
-        Some(match Message::read(rd, self.next_id, self.next_timestamp) {
+        Some(match BufMessage::read(rd, &mut self.msg_buf, self.next_id, self.next_timestamp) {
             Ok(msg) => {
                 self.left -= 1;
                 if self.left > 0 {
-                    match msg.id.checked_add(1) {
+                    match msg.id().checked_add(1) {
                         Some(next_id) => self.next_id = next_id,
                         None => return Some(Err(Error::without_details(BadMessages::IdOverflow))),
                     }
                 }
-                self.next_timestamp = msg.timestamp;
+                self.next_timestamp = msg.timestamp();
                 self.last_pos = Some(last_pos);
                 Ok(msg)
             }
@@ -556,6 +581,10 @@ impl BufEntryBuilder {
     pub fn term(&mut self, term: u64) -> &mut Self {
         self.term = term;
         self
+    }
+
+    pub fn message_count(&self) -> u32 {
+        self.message_count
     }
 
     pub fn message(&mut self, mut msg: MessageBuilder) -> &mut Self {
@@ -739,7 +768,7 @@ mod test {
             assert_eq!(e.first_timestamp(), ts[0]);
             assert_eq!(e.max_timestamp(), ts[1]);
 
-            let act_ts: Vec<_> = e.iter(&buf).map(|v| v.unwrap().timestamp).collect();
+            let act_ts: Vec<_> = e.iter(&buf).map(|v| v.unwrap().timestamp()).collect();
             assert_eq!(&act_ts, ts);
         }
 
@@ -776,7 +805,12 @@ mod test {
                     assert!(buf.len() < uncompressed_len);
                 }
 
-                let actual: Vec<_> = entry.iter(&buf).map(|v| v.unwrap()).collect();
+                let mut actual = Vec::new();
+                let mut it = entry.iter(&buf);
+                while let Some(msg) = it.next() {
+                    let msg = msg.unwrap();
+                    actual.push(msg.to_message(it.msg_buf()));
+                }
                 assert_eq!(actual, msgs);
             }
         }
@@ -788,7 +822,7 @@ mod test {
             let (mut e, mut buf) = b.build();
 
             e.update(&mut buf, Update { start_id: Some(Id::new(0)), ..Default::default() });
-            assert_eq!(e.iter(&buf).next().unwrap().unwrap().id, Id::new(0));
+            assert_eq!(e.iter(&buf).next().unwrap().unwrap().id(), Id::new(0));
         }
     }
 

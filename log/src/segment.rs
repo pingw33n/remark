@@ -680,6 +680,7 @@ mod test {
             assert_eq!(act_entry.max_timestamp(), timestamp1 + 1);
 
             let act_msgs: Vec<_> = act_entry.iter(it.buf())
+                .map_to_message()
                 .map(|m| m.unwrap())
                 .collect();
             assert_eq!(act_msgs, vec![

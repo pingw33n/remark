@@ -1,13 +1,18 @@
+mod buf;
+
 use chrono::{DateTime, NaiveDateTime, Utc};
 use num_integer::Integer;
 use num_traits::cast::ToPrimitive;
 use std::fmt;
 use std::io::prelude::*;
-use std::ops;
+use std::ops::{self, Range};
 use std::time::{Duration, SystemTime};
+
+pub use crate::message::buf::*;
 
 use crate::error::*;
 use crate::util::DurationExt;
+use rcommon::bytes::{BigEndian, Buf, GrowableBuf};
 use rcommon::varint::{self, ReadExt, WriteExt};
 
 #[derive(Clone, Copy, Debug, Eq, Fail, PartialEq)]
@@ -299,32 +304,9 @@ pub struct Message {
 
 impl Message {
     pub fn read(rd: &mut impl Read, next_id: Id, next_timestamp: Timestamp) -> Result<Self> {
-        let len = rd.read_u32_varint().wrap_err_id(ErrorId::Io)?;
-        let id_delta = rd.read_u32_varint().wrap_err_id(ErrorId::Io)?;
-        let timestamp_delta = rd.read_i64_varint().wrap_err_id(ErrorId::Io)?;
-        let headers = Headers::read(rd)?;
-        let key = read_opt_bstring(rd)?;
-        let value = read_opt_bstring(rd)?;
-
-        let id = next_id.checked_add(id_delta as u64).ok_or_else(||
-            Error::without_details(ErrorId::IdOverflow))?;
-        let timestamp = next_timestamp.checked_add_millis(timestamp_delta).ok_or_else(||
-            Error::without_details(ErrorId::TimestampOverflow))?;
-
-        let r = Self {
-            id,
-            timestamp,
-            headers,
-            key,
-            value,
-        };
-
-        // TODO should be already able to tell how much bytes was actually read from rd.
-        if r.writer(next_id, next_timestamp).encoded_len() != cast::usize(len) {
-            return Err(Error::without_details(ErrorId::LenMismatch));
-        }
-
-        Ok(r)
+        let mut buf = Vec::new();
+        let msg = BufMessage::read(rd, &mut buf, next_id, next_timestamp)?;
+        Ok(msg.to_message(&buf))
     }
 
     pub fn writer(&self, next_id: Id, next_timestamp: Timestamp) -> MessageWriter {
