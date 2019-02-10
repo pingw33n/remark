@@ -24,13 +24,8 @@ impl BufMessage {
     /// versions of `BufMessage`.
     pub fn read(rd: &mut impl Read, buf: &mut impl GrowableBuf,
             next_id: Id, next_timestamp: Timestamp) -> Result<Self> {
-        let ref mut rd = BoundedReader::new(rd, u64::max_value());
-
         let len = rd.read_u32_varint().wrap_err_id(ErrorId::Io)?;
-        if len < 4 {
-            return Err(Error::without_details(ErrorId::LenMismatch));
-        }
-        rd.set_len(len as u64);
+        let ref mut rd = BoundedReader::new(rd, len as u64);
 
         let id_delta = rd.read_u32_varint().wrap_err_id(ErrorId::Io)?;
         let timestamp_delta = rd.read_i64_varint().wrap_err_id(ErrorId::Io)?;

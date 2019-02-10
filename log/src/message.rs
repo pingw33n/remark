@@ -320,6 +320,12 @@ impl Message {
             next_timestamp,
         }
     }
+
+    /// Returns length which consists of the encoded length of message frame length field and
+    /// the length of the encoded message.
+    pub fn encoded_frame_len(encoded_len: usize) -> usize {
+        (varint::encoded_len(encoded_len as u64) as usize).checked_add(encoded_len).unwrap()
+    }
 }
 
 pub struct MessageWriter<'a> {
@@ -338,12 +344,15 @@ impl MessageWriter<'_> {
     }
 
     pub fn encoded_len(&self) -> usize {
-        let l = varint::encoded_len(self.id_delta() as u64) as usize +
+        varint::encoded_len(self.id_delta() as u64) as usize +
             varint::encoded_len_i64(self.timestamp_delta()) as usize +
             self.msg.headers.encoded_len() +
             encoded_len_opt_bstring(self.msg.key.as_ref()) +
-            encoded_len_opt_bstring(self.msg.value.as_ref());
-        varint::encoded_len(l as u64) as usize + l
+            encoded_len_opt_bstring(self.msg.value.as_ref())
+    }
+
+    pub fn encoded_frame_len(&self) -> usize {
+        Message::encoded_frame_len(self.encoded_len())
     }
 
     pub fn write(&self, wr: &mut impl Write) -> Result<()> {
@@ -500,7 +509,7 @@ mod test {
                     let wr = msg.writer(next_id, next_timestamp);
 
                     wr.write(cur).unwrap();
-                    assert_eq!(cur.get_ref().len(), wr.encoded_len());
+                    assert_eq!(cur.get_ref().len(), Message::encoded_frame_len(wr.encoded_len()));
 
                     cur.set_position(0);
                     let actual = Message::read(cur,next_id, next_timestamp)
