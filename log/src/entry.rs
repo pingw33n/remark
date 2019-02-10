@@ -13,7 +13,7 @@ use crate::error::*;
 use crate::message::{Id, Message, MessageBuilder, Timestamp};
 use crate::util::compress::*;
 use rcommon::bytes::*;
-use rcommon::io::BoundRead;
+use rcommon::io::BoundedRead;
 
 #[derive(Clone, Copy, Debug, Eq, Fail, PartialEq)]
 pub enum ErrorId {
@@ -127,7 +127,7 @@ impl BufEntry {
         Ok(true)
     }
 
-    fn read_frame_buf(rd: &mut impl BoundRead, buf: &mut impl GrowableBuf,
+    fn read_frame_buf(rd: &mut impl BoundedRead, buf: &mut impl GrowableBuf,
             prolog_only: bool) -> Result<bool> {
         if rd.available().wrap_err_id(ErrorId::Io)? < format::FRAME_PROLOG_FIXED_LEN as u64 {
             return Ok(false);
@@ -162,8 +162,9 @@ impl BufEntry {
         }
     }
 
-    /// Reads entry frame up to where messages data start. Requires `BoundRead` so it can proactively detect truncation.
-    pub fn read_prolog(rd: &mut impl BoundRead, buf: &mut impl GrowableBuf) -> Result<Option<Self>> {
+    /// Reads entry frame up to where messages data start.
+    /// Requires `BoundedRead` so it can proactively detect truncation.
+    pub fn read_prolog(rd: &mut impl BoundedRead, buf: &mut impl GrowableBuf) -> Result<Option<Self>> {
         if Self::read_frame_buf(rd, buf, true)? {
             Self::decode(buf)
         } else {

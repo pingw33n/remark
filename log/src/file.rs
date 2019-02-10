@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 
 use crate::util::atomic::AtomicU64;
 use crate::util::*;
-use rcommon::io::BoundRead;
+use rcommon::io::BoundedRead;
 
 pub struct OpenOptions {
     read_only: bool,
@@ -188,7 +188,7 @@ impl<F: Borrow<File>> Reader<F> {
     }
 }
 
-impl<F: Borrow<File>> BoundRead for Reader<F> {
+impl<F: Borrow<File>> BoundedRead for Reader<F> {
     fn available(&self) -> Result<u64> {
         Ok(self.available())
     }
