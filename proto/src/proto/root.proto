@@ -3,12 +3,14 @@ package proto;
 
 import "common.proto";
 import "pull.proto";
+import "pull_more.proto";
 import "push.proto";
 
 message Request {
     oneof request {
         push.Request push = 1;
         pull.Request pull = 2;
+        pull_more.Request pull_more = 3;
     }
 }
 
@@ -16,5 +18,6 @@ message Response {
     oneof response {
         push.Response push = 1;
         pull.Response pull = 2;
+        pull_more.Response pull_more = 3;
     }
 }

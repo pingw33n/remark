@@ -13,7 +13,7 @@ message Request {
         uint32 shard_id = 2;
     }
     uint32 flags = 1;
-    repeated Entry entries = 2;
+    repeated Entry entries = 2 ;
 }
 
 message Response {

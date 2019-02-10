@@ -1,0 +1,13 @@
+syntax = "proto3";
+package pull_more;
+
+import "common.proto";
+
+message Request {
+    uint32 per_stream_limit_bytes = 2;
+    uint32 timeout_millis = 3;
+}
+
+message Response {
+    common.Response common = 1;
+}

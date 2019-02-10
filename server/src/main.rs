@@ -15,7 +15,7 @@ use rcommon::bytes::*;
 use rcommon::error::*;
 use rcommon::varint::{self, ReadExt, WriteExt};
 use rlog::entry::{BufEntry, BufEntryBuilder};
-use rlog::error::{ErrorId, Result};
+use rlog::error::Result;
 use rlog::log::{self, Log};
 use rlog::message::{Id, MessageBuilder, Timestamp};
 use rproto::*;
@@ -24,6 +24,7 @@ use rproto::common::{Error as ApiError};
 use std::result::{Result as StdResult};
 use std::time::{Duration, Instant};
 use num_traits::cast::ToPrimitive;
+use std::net::TcpStream;
 
 #[global_allocator]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
@@ -145,6 +146,92 @@ fn read_entries(rd: &mut impl Read, count: usize) -> Result<Vec<(BufEntry, Vec<u
     Ok(entries)
 }
 
+struct Stream {
+    iter: rlog::log::Iter,
+    sent_eos: bool,
+}
+
+fn send_pull_streams(streams: &mut Vec<StdResult<Stream, ApiError>>,
+    net_stream: &mut TcpStream, timeout: Duration, limit_bytes: usize)
+{
+    for stream in streams.iter_mut() {
+        if let Ok(stream) = stream {
+            stream.sent_eos = false;
+        }
+    }
+
+    let mut last_activity = Instant::now();
+    let mut first_pass = true;
+    let mut written = 0;
+    loop {
+        let mut done = true;
+
+        let now = Instant::now();
+        for (stream_id, stream) in streams.iter_mut().enumerate() {
+            if let Err(err) = stream {
+                if first_pass {
+                    let err = err.clone();
+                    dbg!(err);
+                    written += write_pb_frame(net_stream, &pull::StreamFrame {
+                        stream_id: stream_id as u32,
+                        error: err.into(),
+                    }).unwrap();
+                }
+                continue;
+            }
+            let stream = stream.as_mut().unwrap();
+            if stream.sent_eos {
+                continue;
+            }
+            if timeout == Duration::from_millis(0) && done
+                || timeout > Duration::from_millis(0) && now - last_activity >= timeout
+                || written >= limit_bytes
+            {
+                written += write_pb_frame(net_stream, &pull::StreamFrame {
+                    stream_id: stream_id as u32,
+                    error: ApiError::EndOfStream.into(),
+                }).unwrap();
+                stream.sent_eos = true;
+                continue;
+            }
+            match stream.iter.next() {
+                Some(Ok(_)) => {
+                    stream.iter.complete_read().unwrap();
+                    written += write_pb_frame(net_stream, &pull::StreamFrame {
+                        stream_id: stream_id as u32,
+                        error: ApiError::None.into(),
+                    }).unwrap();
+                    let buf = stream.iter.buf();
+                    net_stream.write_all(buf).unwrap();
+                    written += buf.len();
+                    done = false;
+                },
+                None => {
+                    written += write_pb_frame(net_stream, &pull::StreamFrame {
+                        stream_id: stream_id as u32,
+                        error: ApiError::EndOfStream.into(),
+                    }).unwrap();
+                }
+                Some(Err(e)) => {
+                    dbg!(e);
+                    written += write_pb_frame(net_stream, &pull::StreamFrame {
+                        stream_id: stream_id as u32,
+                        error: ApiError::UnknownError.into(),
+                    }).unwrap();
+                    stream.sent_eos = true;
+                }
+            }
+            last_activity = now;
+        }
+
+        if done {
+            break;
+        }
+
+        first_pass = false;
+    }
+}
+
 fn main() {
     env_logger::init();
 
@@ -182,6 +269,8 @@ fn main() {
                     println!("new connectoin: {}", net_stream.peer_addr().unwrap());
                     measure_time::print_time!("session");
 
+                    let mut pull_streams: Vec<StdResult<Stream, ApiError>> = Vec::new();
+
                     loop {
                         if terminated.load(Ordering::Relaxed) {
                             println!("shutting down");
@@ -200,24 +289,15 @@ fn main() {
 
                         match req.request.unwrap() {
                             request::Request::Pull(req) => {
-                                #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-                                enum State {
-                                    Writing,
-                                    End,
-                                }
-                                struct Stream {
-                                    iter: rlog::log::Iter,
-                                    state: State,
-                                }
-                                let mut streams = Vec::with_capacity(req.streams.len());
+                                pull_streams.clear();
                                 for req_stream in &req.streams {
                                     let stream = server.lock().pull(&req_stream.topic_name,
                                             req_stream.shard_id, Id::new(req_stream.message_id))
-                                        .map(|iter| Stream { iter, state: State::Writing });
-                                    streams.push(stream);
+                                        .map(|iter| Stream { iter, sent_eos: false });
+                                    pull_streams.push(stream);
                                 }
 
-                                let mut written = write_pb_frame(net_stream, &Response {
+                                write_pb_frame(net_stream, &Response {
                                     response: Some(response::Response::Pull(
                                     pull::Response {
                                         common: Some(common::Response { error: ApiError::None.into() }),
@@ -225,75 +305,23 @@ fn main() {
                                 )) }).unwrap();
 
                                 let timeout = Duration::from_millis(req.timeout_millis as u64);
-                                let writte_limit = req.per_stream_limit_bytes.to_usize().unwrap();
+                                let limit_bytes = req.per_stream_limit_bytes.to_usize().unwrap();
 
-                                let mut last_activity = Instant::now();
-                                let mut first_pass = true;
-                                loop {
-                                    let mut done = true;
+                                send_pull_streams(&mut pull_streams, net_stream, timeout, limit_bytes);
+                            }
+                            request::Request::PullMore(req) => {
+                                dbg!(&req);
+                                let timeout = Duration::from_millis(req.timeout_millis as u64);
+                                let limit_bytes = req.per_stream_limit_bytes.to_usize().unwrap();
 
-                                    let now = Instant::now();
-                                    for (stream_id, stream) in streams.iter_mut().enumerate() {
-                                        if let Err(err) = stream {
-                                            if first_pass {
-                                                let err = err.clone();
-                                                dbg!(err);
-                                                written += write_pb_frame(net_stream, &pull::StreamFrame {
-                                                    stream_id: stream_id as u32,
-                                                    error: err.into(),
-                                                }).unwrap();
-                                            }
-                                            continue;
-                                        }
-                                        let stream = stream.as_mut().unwrap();
-                                        if stream.state == State::End {
-                                            continue;
-                                        }
-                                        if now - last_activity >= timeout || written >= writte_limit {
-                                            written += write_pb_frame(net_stream, &pull::StreamFrame {
-                                                stream_id: stream_id as u32,
-                                                error: ApiError::EndOfStream.into(),
-                                            }).unwrap();
-                                            stream.state = State::End;
-                                            continue;
-                                        }
-                                        match stream.iter.next() {
-                                            Some(Ok(_)) => {
-                                                stream.iter.complete_read().unwrap();
-                                                written += write_pb_frame(net_stream, &pull::StreamFrame {
-                                                    stream_id: stream_id as u32,
-                                                    error: ApiError::None.into(),
-                                                }).unwrap();
-                                                let buf = stream.iter.buf();
-                                                net_stream.write_all(buf).unwrap();
-                                                written += buf.len();
-                                                done = false;
-                                            },
-                                            None => {
-                                                written += write_pb_frame(net_stream, &pull::StreamFrame {
-                                                    stream_id: stream_id as u32,
-                                                    error: ApiError::EndOfStream.into(),
-                                                }).unwrap();
-                                                stream.state = State::End;
-                                            }
-                                            Some(Err(e)) => {
-                                                dbg!(e);
-                                                written += write_pb_frame(net_stream, &pull::StreamFrame {
-                                                    stream_id: stream_id as u32,
-                                                    error: ApiError::UnknownError.into(),
-                                                }).unwrap();
-                                                stream.state = State::End;
-                                            }
-                                        }
-                                        last_activity = now;
+                                write_pb_frame(net_stream, &Response {
+                                    response: Some(response::Response::PullMore(
+                                    pull_more::Response {
+                                        common: Some(common::Response { error: ApiError::None.into() }),
                                     }
+                                )) }).unwrap();
 
-                                    if done {
-                                        break;
-                                    }
-
-                                    first_pass = false;
-                                }
+                                send_pull_streams(&mut pull_streams, net_stream, timeout, limit_bytes);
                             }
                             request::Request::Push(req) => {
                                 let mut entries = read_entries(net_stream, req.entries.len()).unwrap();
