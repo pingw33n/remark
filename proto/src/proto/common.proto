@@ -1,15 +1,18 @@
 syntax = "proto3";
 package common;
 
-enum Status {
-    OK                  = 0;
-    INNER_ERRORS        = 1;
-    BAD_ENTRY           = 2;
-    BAD_REQUEST         = 3;
-    BAD_TOPIC_NAME      = 4;
-    BAD_TOPIC_SHARD_ID  = 5;
+enum Error {
+    NONE                = 0;
+    UNKNOWN_ERROR       = 1;
+    INNER_ERRORS        = 2;
+    BAD_ENTRY           = 3;
+    BAD_REQUEST         = 4;
+    BAD_TOPIC_NAME      = 5;
+    BAD_SHARD_ID        = 6;
+    END_OF_STREAM       = 7;
+
 }
 
 message Response {
-    Status status = 1;
+    Error error = 1;
 }

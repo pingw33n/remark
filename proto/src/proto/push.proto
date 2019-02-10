@@ -18,7 +18,7 @@ message Request {
 
 message Response {
     message Entry {
-        common.Status status = 1;
+        common.Error error = 1;
     }
     common.Response common = 1;
     repeated Entry entries = 2;

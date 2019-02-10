@@ -2,16 +2,19 @@ syntax = "proto3";
 package proto;
 
 import "common.proto";
+import "pull.proto";
 import "push.proto";
 
 message Request {
     oneof request {
         push.Request push = 1;
+        pull.Request pull = 2;
     }
 }
 
 message Response {
     oneof response {
         push.Response push = 1;
+        pull.Response pull = 2;
     }
 }
