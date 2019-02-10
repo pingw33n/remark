@@ -83,7 +83,7 @@ fn bench(c: &mut Criterion) {
     });
     c.bench_function("message_read_uncompressed", |b| {
         use remark_common::bytes::Cursor;
-        use remark_log::entry::{format, Codec};
+        use remark_log::entry::format;
         use remark_log::message::*;
 
         let (_, buf) = create_compressed_entry(1, remark_log::entry::Codec::Uncompressed);
@@ -95,7 +95,7 @@ fn bench(c: &mut Criterion) {
     });
     c.bench_function("buf_message_read_uncompressed", |b| {
         use remark_common::bytes::Cursor;
-        use remark_log::entry::{format, Codec};
+        use remark_log::entry::format;
         use remark_log::message::*;
 
         let (_, buf) = create_compressed_entry(1, remark_log::entry::Codec::Uncompressed);
@@ -109,10 +109,6 @@ fn bench(c: &mut Criterion) {
     });
 
     fn bench_validate_body(b: &mut Bencher, compression: remark_log::entry::Codec) {
-        use remark_common::bytes::Cursor;
-        use remark_log::entry::{format, Codec};
-        use remark_log::message::*;
-
         let (e, buf) = create_compressed_entry(1000, compression);
         b.iter(|| {
             e.validate_body(&buf, remark_log::entry::ValidBody {
