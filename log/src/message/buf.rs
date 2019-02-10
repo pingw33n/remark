@@ -1,6 +1,7 @@
 use super::*;
 use super::ErrorId;
 use rcommon::io::{BoundedRead, BoundedReader};
+use rcommon::varint::ReadExt;
 
 /// Message backed by a flat buffer. Stores only scalar fields of message (like `id` and `timestamp`)
 /// and provides indirect references for non-scalar fields (headers, `key`, `value`).

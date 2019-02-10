@@ -13,7 +13,7 @@ pub use crate::message::buf::*;
 use crate::error::*;
 use crate::util::DurationExt;
 use rcommon::bytes::{BigEndian, Buf, GrowableBuf};
-use rcommon::varint::{self, ReadExt, WriteExt};
+use rcommon::varint::{self, WriteExt};
 
 #[derive(Clone, Copy, Debug, Eq, Fail, PartialEq)]
 pub enum ErrorId {
@@ -368,17 +368,6 @@ impl Headers {
             self.vec.iter().map(|h| h.encoded_len()).sum::<usize>()
     }
 
-    pub fn read(rd: &mut impl Read) -> Result<Self> {
-        let count = cast::usize(rd.read_u32_varint().wrap_err_id(ErrorId::Io)?);
-        let mut vec = Vec::with_capacity(count);
-        for _ in 0..count {
-            vec.push(Header::read(rd)?);
-        }
-        Ok(Self {
-            vec,
-        })
-    }
-
     pub fn write(&self, wr: &mut impl Write) -> Result<()> {
         wr.write_u32_varint(self.vec.len() as u32).wrap_err_id(ErrorId::Io)?;
         for h in &self.vec {
@@ -400,17 +389,6 @@ impl Header {
             encoded_len_bstring(self.value.as_ref())
     }
 
-    pub fn read(rd: &mut impl Read) -> Result<Self> {
-        let name = read_opt_bstring(rd)?
-            .ok_or_else(|| Error::without_details(ErrorId::HeaderNameIsNull))?;
-        let value = read_opt_bstring(rd)?
-            .ok_or_else(|| Error::without_details(ErrorId::HeaderValueIsNull))?;
-        Ok(Self {
-            name,
-            value,
-        })
-    }
-
     pub fn write(&self, wr: &mut impl Write) -> Result<()> {
         write_bstring(wr, &self.name)?;
         write_bstring(wr, &self.value)
@@ -427,18 +405,6 @@ fn encoded_len_opt_bstring<T: AsRef<[u8]>>(buf: Option<T>) -> usize {
         encoded_len_bstring(buf.as_ref())
     } else {
         varint::encoded_len(0) as usize
-    }
-}
-
-fn read_opt_bstring(rd: &mut impl Read) -> Result<Option<Vec<u8>>> {
-    let len = rd.read_u32_varint().wrap_err_id(ErrorId::Io)?;
-    if len == 0 {
-        Ok(None)
-    } else {
-        let mut vec = Vec::with_capacity(cast::usize(len) - 1);
-        vec.resize(vec.capacity(), 0);
-        rd.read_exact(&mut vec).wrap_err_id(ErrorId::Io)?;
-        Ok(Some(vec))
     }
 }
 
