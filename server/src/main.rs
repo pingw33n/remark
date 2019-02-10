@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::net::TcpListener;
 use std::io;
 use std::io::prelude::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rcommon::bytes::*;
 use rcommon::error::*;
@@ -158,17 +160,29 @@ fn main() {
     BufEntry::decode(&buf).unwrap().unwrap().validate_body(&buf,
         remark_log::entry::ValidBody { dense: true, without_timestamp: true } ).unwrap();
 
+    let terminated = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::SIGINT, terminated.clone()).unwrap();
+    signal_hook::flag::register(signal_hook::SIGTERM, terminated.clone()).unwrap();
+    signal_hook::flag::register(signal_hook::SIGQUIT, terminated.clone()).unwrap();
+
     let mut server = Server::new().unwrap();
 
     let l = TcpListener::bind("0.0.0.0:4820").unwrap();
+    l.set_nonblocking(true).unwrap();
+
     for stream in l.incoming() {
         match stream {
             Ok(mut stream) => {
+                stream.set_nonblocking(false).unwrap();
                 let stream = &mut stream;
                 println!("new connectoin: {}", stream.peer_addr().unwrap());
                 measure_time::print_time!("session");
 
                 loop {
+                    if terminated.load(Ordering::Relaxed) {
+                        println!("shutting down");
+                        return;
+                    }
                     measure_time::print_time!("req");
                     let req = match read_pb_frame::<Request, _>(stream) {
                         Ok(v) => v,
@@ -188,18 +202,18 @@ fn main() {
                 }
             }
             Err(e) => {
-                dbg!(e);
+                if e.kind() == io::ErrorKind::WouldBlock {
+                    if terminated.load(Ordering::Relaxed) {
+                        println!("shutting down");
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                } else {
+                    dbg!(e);
+                }
             }
         }
     }
 
-    dbg!(server.push(&push, &mut [(entry, buf)]));
-
-    let mut buf = Vec::with_capacity(push.encoded_len());
-    push.encode(&mut buf).unwrap();
-
-    dbg!(buf.len());
-
-    let push2 = push::Request::decode(&buf).unwrap();
-    dbg!(push2);
+    terminated.store(true, Ordering::Relaxed);
 }
