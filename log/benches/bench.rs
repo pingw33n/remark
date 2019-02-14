@@ -83,7 +83,6 @@ fn bench(c: &mut Criterion) {
     });
     c.bench_function("message_read_uncompressed", |b| {
         use remark_common::bytes::Cursor;
-        use remark_log::entry::format;
         use remark_log::message::*;
 
         let (_, buf) = create_compressed_entry(1, remark_log::entry::Codec::Uncompressed);
@@ -95,14 +94,13 @@ fn bench(c: &mut Criterion) {
     });
     c.bench_function("buf_message_read_uncompressed", |b| {
         use remark_common::bytes::Cursor;
-        use remark_log::entry::format;
         use remark_log::message::*;
 
         let (_, buf) = create_compressed_entry(1, remark_log::entry::Codec::Uncompressed);
         let mut cur = Cursor::new(&buf);
         let mut buf = Vec::new();
         b.iter(|| {
-            cur.set_position(format::MESSAGES_START);
+            cur.set_position(55 /* format::MESSAGES_START */);
             buf.clear();
             BufMessage::read(&mut cur, &mut buf, Id::new(0), Timestamp::epoch()).unwrap();
         });
