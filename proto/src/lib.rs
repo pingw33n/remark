@@ -1,5 +1,15 @@
 #[macro_use] extern crate prost_derive;
 
+pub trait MessageExt: prost::Message {
+    fn encode_as_vec(&self) -> Vec<u8> where Self: Sized {
+        let mut vec = Vec::with_capacity(self.encoded_len());
+        self.encode(&mut vec).unwrap();
+        vec
+    }
+}
+
+impl<T: prost::Message> MessageExt for T {}
+
 mod root {
     include!(concat!(env!("OUT_DIR"), "/proto.rs"));
 }
@@ -28,4 +38,8 @@ pub mod push {
             }
         }
     }
+}
+
+pub mod cluster {
+    include!(concat!(env!("OUT_DIR"), "/cluster.rs"));
 }

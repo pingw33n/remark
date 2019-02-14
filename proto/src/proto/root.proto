@@ -6,6 +6,8 @@ import "pull.proto";
 import "pull_more.proto";
 import "push.proto";
 
+import "cluster.proto";
+
 message Request {
     oneof request {
         push.Request push = 1;

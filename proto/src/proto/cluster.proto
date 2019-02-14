@@ -1,0 +1,39 @@
+syntax = "proto3";
+package cluster;
+
+message Metadata {
+    oneof metadata {
+        Cluster cluster = 1;
+        Node node = 2;
+        Topic topic = 3;
+    }
+}
+
+message Cluster {
+    string uuid = 1;
+}
+
+message Node {
+    string uuid = 1;
+    uint32 id = 2;
+    string host = 3;
+    uint32 port = 4;
+    uint32 system_port = 5;
+}
+
+message Topic {
+    string id = 1;
+    repeated Partition partitions = 2;
+}
+
+message Partition {
+    enum Kind {
+        SINGLE_NODE = 0;
+        MULTI_NODE = 1;
+    }
+    uint32 id = 1;
+    Kind kind = 2;
+    repeated uint32 nodes = 3;
+    // None if < 0
+    sint32 leader = 4;
+}
