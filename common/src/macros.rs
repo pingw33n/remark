@@ -7,3 +7,17 @@ macro_rules! clone {
         }
     );
 }
+
+#[macro_export]
+macro_rules! contain {
+    ($ty:ty; $($tt:tt)*) => {
+        (|| -> $ty {
+            $($tt)*
+        })()
+    };
+    ($($tt:tt)*) => {
+        (|| {
+            $($tt)*
+        })()
+    };
+}

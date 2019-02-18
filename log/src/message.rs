@@ -11,8 +11,8 @@ use std::time::{Duration, SystemTime};
 pub use crate::message::buf::*;
 
 use crate::error::*;
-use crate::util::DurationExt;
 use rcommon::bytes::{BigEndian, Buf, GrowableBuf};
+use rcommon::util::DurationExt;
 use rcommon::varint::{self, WriteExt};
 
 #[derive(Clone, Copy, Debug, Eq, Fail, PartialEq)]

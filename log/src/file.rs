@@ -8,8 +8,8 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use crate::util::atomic::AtomicU64;
-use crate::util::*;
 use rcommon::io::BoundedRead;
+use rcommon::util::*;
 
 pub struct OpenOptions {
     read_only: bool,
