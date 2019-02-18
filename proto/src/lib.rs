@@ -31,9 +31,9 @@ pub mod push {
     include!(concat!(env!("OUT_DIR"), "/push.rs"));
 
     impl Response {
-        pub fn empty(error: super::common::Error) -> Self {
+        pub fn empty(status: super::common::Status) -> Self {
             Self {
-                common: Some(super::common::Response { error: error.into() }),
+                common: Some(super::common::Response { status: status.into() }),
                 ..Default::default()
             }
         }

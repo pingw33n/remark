@@ -1,18 +1,23 @@
 syntax = "proto3";
 package common;
 
-enum Error {
-    NONE                = 0;
+enum Status {
+    OK = 0;
     UNKNOWN_ERROR       = 1;
     INNER_ERRORS        = 2;
     BAD_ENTRY           = 3;
     BAD_REQUEST         = 4;
     BAD_TOPIC_NAME      = 5;
-    BAD_SHARD_ID        = 6;
+    BAD_PARTITION_ID        = 6;
     END_OF_STREAM       = 7;
 
 }
 
 message Response {
-    Error error = 1;
+    Status status = 1;
+}
+
+message ResponseStreamFrameHeader {
+    uint32 stream_id = 1;
+    common.Status status = 2;
 }

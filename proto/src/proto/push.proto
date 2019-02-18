@@ -9,8 +9,8 @@ message Request {
         USE_TIMESTAMPS = 0x1;
     }
     message Entry {
-        string topic_name = 1;
-        uint32 shard_id = 2;
+        string topic_id = 1;
+        uint32 partition_id = 2;
     }
     uint32 flags = 1;
     repeated Entry entries = 2 ;
@@ -18,7 +18,7 @@ message Request {
 
 message Response {
     message Entry {
-        common.Error error = 1;
+        common.Status status = 1;
     }
     common.Response common = 1;
     repeated Entry entries = 2;
