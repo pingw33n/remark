@@ -8,6 +8,7 @@ extern crate remark_log as rlog;
 extern crate remark_proto as rproto;
 
 mod error;
+mod raft;
 mod rpc;
 
 use prost::{Message as PMessage};
@@ -32,12 +33,12 @@ use std::path::Path;
 use uuid::Uuid;
 use log::*;
 use crate::error::*;
+pub use rproto::cluster::partition::{Kind as PartitionKind};
+use crate::rpc::{Endpoint, RequestSession, Rpc};
+use rcommon::util::OptionResultExt;
 
 #[global_allocator]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
-
-pub use rproto::cluster::partition::{Kind as PartitionKind};
-use crate::rpc::RequestSession;
 
 #[derive(Default)]
 struct TopicStore {
@@ -67,6 +68,7 @@ impl Default for ClusterMetadata {
 
 impl ClusterMetadata {
     pub fn apply(&mut self, metadata: cluster::Metadata) {
+        debug!("applying cluster metadata log entry: {:#?}", metadata);
         if metadata.metadata.is_none() {
             return;
         }
@@ -298,12 +300,15 @@ struct Node {
     store: Store,
     id: u32,
     cluster_ctrl: Option<ClusterController>,
+    raft_clusters: HashMap<(String, u32), raft::Cluster>,
 }
 
 impl Node {
-    pub fn bootstrap_cluster<P: AsRef<Path>>(paths: &[P], node_meta: NodeMetadata) -> Result<Self> {
+    pub fn bootstrap_cluster<P: AsRef<Path>>(paths: &[P], node_meta: NodeMetadata, rpc: &Rpc) -> Result<Self> {
         let mut store = Store::open_or_create(paths)
             .context("opening store")?;
+
+        let my_uuid = node_meta.uuid;
 
         if !store.is_partition_exists(CLUSTER_METADATA_TOPIC, 0) {
             info!("cluster metadata doesn't exist, will bootstrap new cluster");
@@ -347,6 +352,40 @@ impl Node {
 
         info!("{:#?}", cluster_meta);
 
+        let my_id = cluster_meta.nodes.values()
+            .filter(|n| n.uuid == my_uuid)
+            .map(|n| n.id)
+            .next()
+            .unwrap();
+
+        let mut raft_clusters = HashMap::new();
+        for tm in cluster_meta.topics.values() {
+            for pm in tm.partitions.values() {
+                if pm.nodes.contains(&my_id) {
+                    debug!("found myself ({}) among nodes for {}/{}: {:?}",
+                        my_id, tm.id, pm.id, pm.nodes);
+                    let last_entry = store.topics[&tm.id].partitions[&pm.id].log.iter(..)
+                        .last()
+                        .transpose_()
+                        .expect("FIXME")
+                        .map(|e| (e.start_id(), e.term()));
+                    debug!("creating raft cluster with last_entry={:?}", last_entry);
+                    let mut rc = raft::Cluster::new(my_id, last_entry, tm.id.clone(), pm.id);
+                    for nid in &pm.nodes {
+                        if let Some(node) = cluster_meta.nodes.get(&nid) {
+                            rc.add_node(node.id, rpc.endpoint_client(Endpoint {
+                                host: node.host.clone(),
+                                port: node.system_port,
+                            }));
+                        } else {
+                            error!("unknown node id `{}`", nid);
+                        }
+                    }
+                    raft_clusters.insert((tm.id.clone(), pm.id), rc);
+                }
+            }
+        }
+
         let cluster_ctrl = Some(ClusterController {
             metadata: cluster_meta,
         });
@@ -355,6 +394,7 @@ impl Node {
             store,
             id: 0,
             cluster_ctrl,
+            raft_clusters: raft_clusters,
         })
     }
 
@@ -384,14 +424,25 @@ impl Node {
                 Status::BadPartitionId
             }
         } else {
-            Status::BadTopicName
+            Status::BadTopicId
         }
     }
 
-    pub fn pull(&self, topic_name: &str, partition_id: u32, message_id: Id) -> StdResult<rlog::log::Iter, Status> {
-        let topic = self.store.topics.get(topic_name).ok_or(Status::BadTopicName)?;
+    pub fn pull(&self, topic_id: &str, partition_id: u32, message_id: Id) -> StdResult<rlog::log::Iter, Status> {
+        let topic = self.store.topics.get(topic_id).ok_or(Status::BadTopicId)?;
         let partition = topic.partitions.get(&partition_id).ok_or(Status::BadPartitionId)?;
         Ok(partition.log.iter(message_id..))
+    }
+
+    pub fn ask_vote(&mut self, req: rproto::ask_vote::Request) -> rproto::ask_vote::Response {
+        if let Some(rc) = self.raft_clusters.get_mut(&(req.topic_id.clone(), req.partition_id)) {
+            rc.ask_vote(&req)
+        } else {
+            rproto::ask_vote::Response {
+                common: Some(rproto::common::Response { status: Status::BadRaftClusterId.into() }),
+                ..Default::default()
+            }
+        }
     }
 }
 
@@ -495,7 +546,7 @@ fn handle_push_request(
                 resp.entries.push(response::Entry { status: status.into() });
                 status
             } else {
-                return session.respond(&Response::empty(Status::BadRequest));
+                return session.respond(&rproto::Response { response: Some(rproto::response::Response::Push(Response::empty(Status::BadRequest))) });
             };
             if status != Status::Ok {
                 resp.common.as_mut().unwrap().status = Status::InnerErrors.into();
@@ -527,6 +578,8 @@ fn main() {
     signal_hook::flag::register(signal_hook::SIGTERM, shutdown.clone()).unwrap();
     signal_hook::flag::register(signal_hook::SIGQUIT, shutdown.clone()).unwrap();
 
+    let rpc = Rpc::new(Default::default());
+
     let node = Arc::new(Mutex::new(Node::bootstrap_cluster(&[
         "/tmp/remark/dir1",
         "/tmp/remark/dir2",
@@ -536,7 +589,7 @@ fn main() {
         host: "localhost".into(),
         port: 4820,
         system_port: 4821,
-    }).unwrap()));
+    }, &rpc).unwrap()));
 
     if !node.lock().store.is_partition_exists("topic1", 0) {
         node.lock().store.create_partition("topic1", 0).unwrap();
@@ -563,7 +616,7 @@ fn main() {
             request::Request::Pull(req) => {
                 ctx.pull_streams.clear();
                 for req_stream in &req.streams {
-                    let stream = node.lock().pull(&req_stream.topic_name,
+                    let stream = node.lock().pull(&req_stream.topic_id,
                             req_stream.partition_id, Id::new(req_stream.message_id))
                         .map(|iter| Stream { iter, sent_eos: false });
                     ctx.pull_streams.push(stream);
@@ -595,106 +648,11 @@ fn main() {
             request::Request::Push(req) => {
                 handle_push_request(req, session, &node)?;
             }
+            request::Request::AskVote(req) => {
+                session.respond(&node.lock().ask_vote(req).into())?;
+            }
         }
 
         Ok(())
     })).unwrap().join().unwrap();
-
-//    let l = TcpListener::bind("0.0.0.0:4820").unwrap();
-//    l.set_nonblocking(true).unwrap();
-//
-//    let workers = threadpool::ThreadPool::new(16);
-//
-//
-//    for net_stream in l.incoming() {
-//        match net_stream {
-//            Ok(mut net_stream) => {
-//                workers.execute(clone!(terminated, server => move || {
-//                    net_stream.set_nonblocking(false).unwrap();
-//                    let net_stream = &mut net_stream;
-//                    println!("new connectoin: {}", net_stream.peer_addr().unwrap());
-//                    measure_time::print_time!("session");
-//
-//                    let mut pull_streams: Vec<StdResult<Stream, Status>> = Vec::new();
-//
-//                    loop {
-//                        if terminated.load(Ordering::Relaxed) {
-//                            println!("shutting down");
-//                            return;
-//                        }
-//                        measure_time::print_time!("req");
-//                        let req = match read_pb_frame::<Request, _>(net_stream) {
-//                            Ok(v) => v,
-//                            Err(e) => {
-//                                dbg!(e);
-//                                break;
-//                            }
-//                        };
-//
-//                        dbg!(&req);
-//
-//                        match req.request.unwrap() {
-//                            request::Request::Pull(req) => {
-//                                pull_streams.clear();
-//                                for req_stream in &req.streams {
-//                                    let stream = server.lock().pull(&req_stream.topic_name,
-//                                            req_stream.shard_id, Id::new(req_stream.message_id))
-//                                        .map(|iter| Stream { iter, sent_eos: false });
-//                                    pull_streams.push(stream);
-//                                }
-//
-//                                write_pb_frame(net_stream, &Response {
-//                                    response: Some(response::Response::Pull(
-//                                    pull::Response {
-//                                        common: Some(common::Response { status: Status::Ok.into() }),
-//                                    }
-//                                )) }).unwrap();
-//
-//                                let timeout = Duration::from_millis(req.timeout_millis as u64);
-//                                let limit_bytes = req.per_stream_limit_bytes.to_usize().unwrap();
-//
-//                                send_pull_streams(&mut pull_streams, net_stream, timeout, limit_bytes);
-//                            }
-//                            request::Request::PullMore(req) => {
-//                                dbg!(&req);
-//                                let timeout = Duration::from_millis(req.timeout_millis as u64);
-//                                let limit_bytes = req.per_stream_limit_bytes.to_usize().unwrap();
-//
-//                                write_pb_frame(net_stream, &Response {
-//                                    response: Some(response::Response::PullMore(
-//                                    pull_more::Response {
-//                                        common: Some(common::Response { status: Status::Ok.into() }),
-//                                    }
-//                                )) }).unwrap();
-//
-//                                send_pull_streams(&mut pull_streams, net_stream, timeout, limit_bytes);
-//                            }
-//                            request::Request::Push(req) => {
-//                                let mut entries = read_entries(net_stream, req.entries.len()).unwrap();
-//                                let resp = server.lock().push(&req, &mut entries);
-//                                write_pb_frame(net_stream, &Response {
-//                                    response: Some(response::Response::Push(resp))
-//                                }).unwrap();
-//                            }
-//                        }
-//                    }
-//                }));
-//            }
-//            Err(e) => {
-//                if e.kind() == io::ErrorKind::WouldBlock {
-//                    if terminated.load(Ordering::Relaxed) {
-//                        println!("shutting down");
-//                        return;
-//                    }
-//                    std::thread::sleep(std::time::Duration::from_millis(100));
-//                } else {
-//                    dbg!(e);
-//                }
-//            }
-//        }
-//    }
-//
-//    terminated.store(true, Ordering::Relaxed);
-//
-//    workers.join();
 }

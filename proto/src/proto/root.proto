@@ -2,24 +2,27 @@ syntax = "proto3";
 package proto;
 
 import "common.proto";
+import "cluster.proto";
+
+import "ask_vote.proto";
 import "pull.proto";
 import "pull_more.proto";
 import "push.proto";
 
-import "cluster.proto";
-
 message Request {
     oneof request {
-        push.Request push = 1;
-        pull.Request pull = 2;
-        pull_more.Request pull_more = 3;
+        ask_vote.Request ask_vote = 1;
+        push.Request push = 2;
+        pull.Request pull = 3;
+        pull_more.Request pull_more = 4;
     }
 }
 
 message Response {
     oneof response {
-        push.Response push = 1;
-        pull.Response pull = 2;
-        pull_more.Response pull_more = 3;
+        ask_vote.Response ask_vote = 1;
+        push.Response push = 2;
+        pull.Response pull = 3;
+        pull_more.Response pull_more = 4;
     }
 }

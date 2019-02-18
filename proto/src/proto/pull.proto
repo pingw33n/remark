@@ -5,7 +5,7 @@ import "common.proto";
 
 message Request {
     message Stream {
-        string topic_name = 1;
+        string topic_id = 1;
         uint32 partition_id = 2;
         uint64 message_id = 3;
     }

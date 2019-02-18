@@ -19,6 +19,7 @@ use rcommon::util::*;
 use rcommon::varint::{self, ReadExt, WriteExt};
 use rlog::entry::BufEntry;
 use rproto::common::{Status, ResponseStreamFrameHeader};
+use rproto::{Request, Response};
 
 use crate::error::*;
 
@@ -43,14 +44,10 @@ pub struct Endpoint {
     pub port: u16,
 }
 
-impl fmt::Display for Endpoint {
+impl fmt::Debug for Endpoint {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}:{}", self.host, self.port)
     }
-}
-
-pub trait Sendable: fmt::Debug {
-    fn send<W: Write>(&self, dest: &mut W) -> Result<()>;
 }
 
 struct ClientInner {
@@ -60,13 +57,20 @@ struct ClientInner {
 }
 
 impl ClientInner {
-    pub fn ask<Req: Sendable, Resp: Default + Message>(&mut self, endpoint: Endpoint, req: Req)
-        -> Result<Resp>
+    pub fn new_wrapped(options: ClientOptions) -> Arc<Mutex<Self>> {
+        Arc::new(Mutex::new(Self {
+            options,
+            host_cache: HashMap::new(),
+            connections: HashMap::new(),
+        }))
+    }
+
+    pub fn ask(&mut self, endpoint: Endpoint, req: &Request) -> Result<Response>
     {
-        trace!("asking {} with {:#?}", endpoint, req);
+        trace!("asking {:?} with {:#?}", endpoint, req);
         let mut conn = self.acquire_conn(endpoint)?;
         let r = (|| {
-            req.send(&mut conn.conn)?;
+            write_pb_frame(&mut conn.conn, req).wrap_err_id(ErrorId::Io)?;
             read_pb_frame(&mut conn.conn).wrap_err_id(ErrorId::Io)
         })();
         trace!("got response: {:#?}", r);
@@ -159,26 +163,53 @@ impl Default for ClientOptions {
     }
 }
 
+pub struct Rpc {
+    client: Arc<Mutex<ClientInner>>,
+}
+
+impl Rpc {
+    pub fn new(options: ClientOptions) -> Self {
+        Self {
+            client: ClientInner::new_wrapped(options),
+        }
+    }
+
+    pub fn client(&self) -> Client {
+        Client {
+            inner: self.client.clone(),
+        }
+    }
+
+    pub fn endpoint_client(&self, endpoint: Endpoint) -> EndpointClient {
+        EndpointClient {
+            client: self.client(),
+            endpoint,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Client {
     inner: Arc<Mutex<ClientInner>>,
 }
 
 impl Client {
-    pub fn new(options: ClientOptions) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(ClientInner {
-                options,
-                host_cache: HashMap::new(),
-                connections: HashMap::new(),
-            })),
-        }
-    }
-
-    pub fn ask<Req: Sendable, Resp: Default + Message>(&self, endpoint: Endpoint, req: Req)
-        -> Result<Resp>
+    pub fn ask(&self, endpoint: Endpoint, req: &Request) -> Result<Response>
     {
         self.inner.lock().ask(endpoint, req)
+    }
+}
+
+#[derive(Clone)]
+pub struct EndpointClient {
+    client: Client,
+    endpoint: Endpoint,
+}
+
+impl EndpointClient {
+    pub fn ask(&self, req: &Request) -> Result<Response>
+    {
+        self.client.ask(self.endpoint.clone(), req)
     }
 }
 
@@ -281,13 +312,11 @@ impl<'a> RequestSession<'a> {
         }
     }
 
-    pub fn respond(mut self, response: &impl Message) -> Result<()> {
+    pub fn respond(mut self, response: &Response) -> Result<()> {
         self.write_response(response)
     }
 
-    pub fn respond_with_stream(mut self, response: &impl Message)
-        -> Result<StreamWriter<'a>>
-    {
+    pub fn respond_with_stream(mut self, response: &Response) -> Result<StreamWriter<'a>> {
         self.write_response(response)?;
         Ok(StreamWriter {
             session: self,
@@ -295,7 +324,7 @@ impl<'a> RequestSession<'a> {
         })
     }
 
-    fn write_response(&mut self, response: &impl Message) -> Result<()> {
+    fn write_response(&mut self, response: &Response) -> Result<()> {
         debug!("[{}] {:#?}", self.conn.peer_addr().unwrap(), response);
         write_pb_frame(self.conn, response)
             .wrap_err_id(ErrorId::Io)

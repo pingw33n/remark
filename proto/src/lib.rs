@@ -12,11 +12,23 @@ impl<T: prost::Message> MessageExt for T {}
 
 mod root {
     include!(concat!(env!("OUT_DIR"), "/proto.rs"));
+
+    impl From<super::ask_vote::Response> for Response {
+        fn from(v: super::ask_vote::Response) -> Self {
+            Self {
+                response: Some(response::Response::AskVote(v)),
+            }
+        }
+    }
 }
 pub use root::*;
 
 pub mod common {
     include!(concat!(env!("OUT_DIR"), "/common.rs"));
+}
+
+pub mod ask_vote {
+    include!(concat!(env!("OUT_DIR"), "/ask_vote.rs"));
 }
 
 pub mod pull {

@@ -7,9 +7,10 @@ enum Status {
     INNER_ERRORS        = 2;
     BAD_ENTRY           = 3;
     BAD_REQUEST         = 4;
-    BAD_TOPIC_NAME      = 5;
-    BAD_PARTITION_ID        = 6;
+    BAD_TOPIC_ID        = 5;
+    BAD_PARTITION_ID    = 6;
     END_OF_STREAM       = 7;
+    BAD_RAFT_CLUSTER_ID = 8;
 
 }
 

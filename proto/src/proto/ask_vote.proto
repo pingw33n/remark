@@ -1,0 +1,22 @@
+syntax = "proto3";
+package ask_vote;
+
+import "common.proto";
+
+message Request {
+    message Entry {
+        uint64 id = 1;
+        uint64 term = 2;
+    }
+    string topic_id = 1;
+    uint32 partition_id = 2;
+    uint64 term = 3;
+    uint32 node_id = 4;
+    Entry last_entry = 5;
+}
+
+message Response {
+    common.Response common = 1;
+    uint64 term = 2;
+    bool vote_granted = 3;
+}
