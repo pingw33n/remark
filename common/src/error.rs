@@ -1,8 +1,11 @@
 use backtrace::Backtrace;
 use std::borrow::Cow;
-use std::error::{Error as StdError};
 use std::fmt;
 use std::cell::RefCell;
+
+pub trait Cause: 'static + fmt::Debug + fmt::Display + Send {}
+
+impl<T: 'static + fmt::Debug + fmt::Display + Send> Cause for T {}
 
 /// Generic chained error type.
 ///
@@ -21,7 +24,7 @@ use std::cell::RefCell;
 pub struct Error<Id> {
     id: Id,
     details: Option<Cow<'static, str>>,
-    cause: Option<Box<'static + StdError>>,
+    cause: Option<Box<Cause>>,
     backtrace: RefCell<Backtrace>,
     context: Option<Context>,
 }
@@ -35,7 +38,7 @@ impl<T> Error<T> {
         Self::new0(id, None, None)
     }
 
-    pub fn with_cause(self, cause: impl 'static + StdError) -> Self {
+    pub fn with_cause(self, cause: impl Cause) -> Self {
         Self::new0(self.id, self.details, Some(Box::new(cause)))
     }
 
@@ -68,7 +71,7 @@ impl<T> Error<T> {
     }
 
     fn new0(id: impl Into<T>, details: Option<Cow<'static, str>>,
-            cause: Option<Box<'static + StdError>>) -> Self {
+            cause: Option<Box<Cause>>) -> Self {
         Self {
             id: id.into(),
             details,
@@ -82,12 +85,6 @@ impl<T> Error<T> {
         let mut bt = self.backtrace.borrow_mut();
         bt.resolve();
         write!(f, "{:?}", bt)
-    }
-}
-
-impl<T: fmt::Debug + fmt::Display> StdError for Error<T> {
-    fn source(&self) -> Option<&('static + StdError)> {
-        self.cause.as_ref().map(|v| &**v)
     }
 }
 
@@ -107,7 +104,7 @@ impl<T: fmt::Debug + fmt::Display> fmt::Display for Error<T> {
         }
         write!(f, " ({:?})", self.id)?;
 
-        if let Some(cause) = self.source() {
+        if let Some(cause) = self.cause.as_ref() {
             writeln!(f)?;
             write!(f, "   => caused by: {}", cause)?;
         }
@@ -127,6 +124,38 @@ struct Context {
     message: Cow<'static, str>,
     next: Option<Box<Self>>,
 }
+
+pub trait ErrorExt: Cause {
+    fn wrap_err<IdIn, IdOut, D>(self, id: IdIn, details: D) -> Error<IdOut>
+        where IdOut: fmt::Debug + fmt::Display,
+              IdIn: Into<IdOut>,
+              D: Into<Cow<'static, str>>,
+              Self: 'static + Sized + Send,
+    {
+        self.wrap_with(|_| (id, details))
+    }
+
+    fn wrap_with<IdIn, IdOut, M, F>(self, f: F) -> Error<IdOut>
+        where IdOut: fmt::Debug + fmt::Display,
+              IdIn: Into<IdOut>,
+              M: Into<Cow<'static, str>>,
+              F: FnOnce(&Self) -> (IdIn, M),
+              Self: 'static + Sized + Send,
+    {
+        let (id, details) = f(&self);
+        Error::new(id, details).with_cause(self)
+    }
+
+    fn wrap_id<IdIn, IdOut>(self, id: IdIn) -> Error<IdOut>
+        where IdOut: fmt::Debug + fmt::Display,
+              IdIn: Into<IdOut>,
+              Self: 'static + Sized + Send,
+    {
+         Error::without_details(id).with_cause(self)
+    }
+}
+
+impl<T: Cause> ErrorExt for T {}
 
 pub trait ResultExt<T, E> {
     fn wrap_err<IdIn, IdOut, D>(self, id: IdIn, details: D) -> Result<T, Error<IdOut>>
@@ -149,23 +178,20 @@ pub trait ResultExt<T, E> {
               IdIn: Into<IdOut>;
 }
 
-impl<T, E: 'static + StdError> ResultExt<T, E> for Result<T, E> {
+impl<T, E: Cause> ResultExt<T, E> for Result<T, E> {
     fn wrap_err_with<IdIn, IdOut, D, F>(self, f: F) -> Result<T, Error<IdOut>>
             where IdOut: fmt::Debug + fmt::Display,
                   IdIn: Into<IdOut>,
                   D: Into<Cow<'static, str>>,
                   F: FnOnce(&E) -> (IdIn, D) {
-        self.map_err(move |cause| {
-            let (id, details) = f(&cause);
-            Error::new(id, details).with_cause(cause)
-        })
+        self.map_err(move |cause| cause.wrap_with(f))
     }
 
     fn wrap_err_id<IdIn, IdOut>(self, id: IdIn) -> Result<T, Error<IdOut>>
         where IdOut: fmt::Debug + fmt::Display,
               IdIn: Into<IdOut>,
     {
-        self.map_err(move |cause| Error::without_details(id).with_cause(cause))
+        self.map_err(move |cause| cause.wrap_id(id))
     }
 }
 
