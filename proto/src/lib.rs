@@ -13,6 +13,25 @@ impl<T: prost::Message> MessageExt for T {}
 mod root {
     include!(concat!(env!("OUT_DIR"), "/proto.rs"));
 
+    impl Request {
+        pub fn has_stream(&self) -> bool {
+            use request::Request::*;
+            if let Some(req) = &self.request {
+                match req {
+                    | AskVote(_)
+                    => false,
+
+                    | Pull(_)
+                    | PullMore(_)
+                    | Push(_)
+                    => true,
+                }
+            } else {
+                false
+            }
+        }
+    }
+
     impl From<super::ask_vote::Response> for Response {
         fn from(v: super::ask_vote::Response) -> Self {
             Self {

@@ -10,6 +10,7 @@ extern crate remark_proto as rproto;
 mod error;
 mod raft;
 mod rpc;
+mod rpc2;
 
 use prost::{Message as PMessage};
 use std::collections::HashMap;
@@ -520,46 +521,68 @@ fn send_entry_streams(
     Ok(())
 }
 
-fn handle_push_request(
-    req: rproto::push::Request,
-    mut session: RequestSession,
-    node: &NodeHandle)
-    -> Result<()>
-{
-    use rproto::push::*;
-    let mut resp = Response::default();
-    resp.common = Some(rproto::common::Response::default());
-    resp.entries = Vec::with_capacity(req.entries.len());
-
-    {
-        let mut entries = session.read_entries(req.entries.len());
-        for req_entry in &req.entries {
-            let status = if let Some(entry) = entries.next() {
-                let mut entry = entry?;
-                dbg!(&entry);
-                let status = node.lock().push(
-                    &req_entry.topic_id,
-                    req_entry.partition_id,
-                    req.flags & remark_proto::push::request::Flags::UseTimestamps as u32 != 0,
-                    &mut entry,
-                    entries.buf_mut());
-                resp.entries.push(response::Entry { status: status.into() });
-                status
-            } else {
-                return session.respond(&rproto::Response { response: Some(rproto::response::Response::Push(Response::empty(Status::BadRequest))) });
-            };
-            if status != Status::Ok {
-                resp.common.as_mut().unwrap().status = Status::InnerErrors.into();
-            }
-        }
-    }
-    session.respond(&rproto::Response {
-        response: Some(rproto::response::Response::Push(resp)),
-    })
-}
+//fn handle_push_request(
+//    req: rproto::push::Request,
+//    mut session: RequestSession,
+//    node: &NodeHandle)
+//    -> Result<()>
+//{
+//    use rproto::push::*;
+//    let mut resp = Response::default();
+//    resp.common = Some(rproto::common::Response::default());
+//    resp.entries = Vec::with_capacity(req.entries.len());
+//
+//    {
+//        let mut entries = session.read_entries(req.entries.len());
+//        for req_entry in &req.entries {
+//            let status = if let Some(entry) = entries.next() {
+//                let mut entry = entry?;
+//                dbg!(&entry);
+//                let status = node.lock().push(
+//                    &req_entry.topic_id,
+//                    req_entry.partition_id,
+//                    req.flags & remark_proto::push::request::Flags::UseTimestamps as u32 != 0,
+//                    &mut entry,
+//                    entries.buf_mut());
+//                resp.entries.push(response::Entry { status: status.into() });
+//                status
+//            } else {
+//                return session.respond(&rproto::Response { response: Some(rproto::response::Response::Push(Response::empty(Status::BadRequest))) });
+//            };
+//            if status != Status::Ok {
+//                resp.common.as_mut().unwrap().status = Status::InnerErrors.into();
+//            }
+//        }
+//    }
+//    session.respond(&rproto::Response {
+//        response: Some(rproto::response::Response::Push(resp)),
+//    })
+//}
 
 fn main() {
-    env_logger::init();
+    env_logger::Builder::from_default_env()
+        .format(|buf, record| {
+            let thread = std::thread::current();
+            if let Some(thread_name) = thread.name() {
+                writeln!(buf, "[{} {:5} {}][{}] {}",
+                    buf.precise_timestamp(), record.level(),
+                    record.module_path().unwrap_or(""),
+                    thread_name,
+                    record.args())
+            } else {
+                writeln!(buf, "[{} {:5} {}][{:?}] {}",
+                    buf.precise_timestamp(), record.level(),
+                    record.module_path().unwrap_or(""),
+                    thread.id(),
+                    record.args())
+            }
+        })
+        .init();
+
+    {
+        rpc2::foo();
+        return;
+    }
 
     let mut b = BufEntryBuilder::dense();
 //    b.compression(remark_log::entry::Codec::Lz4);
@@ -646,7 +669,7 @@ fn main() {
                 send_entry_streams(stream_wr, &mut ctx.pull_streams, timeout, limit_bytes)?;
             }
             request::Request::Push(req) => {
-                handle_push_request(req, session, &node)?;
+//                handle_push_request(req, session, &node)?;
             }
             request::Request::AskVote(req) => {
                 session.respond(&node.lock().ask_vote(req).into())?;
