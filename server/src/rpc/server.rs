@@ -1,6 +1,7 @@
 use log::*;
 use std::net::SocketAddr;
 use std::time::Duration;
+use stream_cancel::{StreamExt as ScStreamExt};
 use tk_listen::ListenExt;
 use tokio::net::TcpListener;
 use tokio::prelude::*;
@@ -30,7 +31,7 @@ impl Default for Options {
         Self {
             sleep_on_error: Duration::from_millis(500),
             max_connections: 10000,
-            socket_timeout: Duration::from_secs(30),
+            socket_timeout: Duration::from_secs(30000),
             max_frame_count: 1000,
             max_single_payload_len: 1024 * 1024,
             max_total_payload_len: u32::max_value(),
@@ -59,11 +60,10 @@ impl HandlerResult {
     }
 }
 
-// FIXME accept shutdown signal that will make it gracefully stop precessing requests at read
-// request boundary.
-pub fn serve<Ctx, OnConnect, OnConnectRes, Handler, HandlerRes>(
+pub fn serve<Ctx, Shutdown, OnConnect, OnConnectRes, Handler, HandlerRes>(
     addr: SocketAddr,
     options: Options,
+    shutdown: Shutdown,
     on_connect: OnConnect,
     handler: Handler,
     ) -> impl Future<Item=(), Error=()>
@@ -76,6 +76,7 @@ pub fn serve<Ctx, OnConnect, OnConnectRes, Handler, HandlerRes>(
             -> HandlerRes + Send + Clone + 'static,
         HandlerRes: IntoFuture<Item=HandlerResult, Error=Error>,
         HandlerRes::Future: Send + 'static,
+        Shutdown: Future<Item = (), Error = ()> + Clone + Send + 'static,
 {
     let socket_timeout = options.socket_timeout;
     let limits = StreamLimits {
@@ -95,18 +96,19 @@ pub fn serve<Ctx, OnConnect, OnConnectRes, Handler, HandlerRes>(
         listener
             .incoming()
             .sleep_on_error(options.sleep_on_error)
-            .for_each(move |socket| {
+            .for_each(clone!(shutdown => move |socket| {
                 let sock_id = socket_id_debug(&socket);
                 debug!("[{:?}] new connection", sock_id);
                 let handler = handler.clone();
                 tokio::spawn(on_connect()
                     .into_future()
                     .map_err(move |e| error!("[{:?}] error in on_connect(): {:?}", sock_id, e))
-                    .and_then(move |mut ctx| {
+                    .and_then(clone!(shutdown => move |mut ctx| {
                         let (rd, wr) = socket.split();
                         let wr = ShexAsyncWrite::new(wr);
                         read_requests(rd, socket_timeout, limits)
                             .map_err(move |e| error!("[{:?}] error reading request: {:?}", sock_id, e))
+                            .take_until(shutdown.map(move |_| debug!("[{:?}] shutting down connection", sock_id)))
                             .for_each(move |(req, stream)| {
                                 trace!("[{:?}] request {}: {:#?}", sock_id,
                                     if req.has_stream() { "with stream " } else { "" },
@@ -132,8 +134,10 @@ pub fn serve<Ctx, OnConnect, OnConnectRes, Handler, HandlerRes>(
                                         }
                                     })
                             })
-                    }))
-            })
+                    })))
+            }))
+            .select(shutdown.map(move |_| info!("shutting down RPC server at {}", addr)))
+            .map_all_unit()
             .into_box()
     })
 }

@@ -34,7 +34,6 @@ use crate::error::*;
 pub use rproto::cluster::partition::{Kind as PartitionKind};
 use rpc::Endpoint;
 use rcommon::util::OptionResultExt;
-use crate::rpc::ResponseStreamFrame;
 use crate::rpc::client::EndpointClient;
 use futures::Future;
 use tokio::prelude::*;
@@ -44,7 +43,6 @@ use rcommon::futures::FutureExt;
 use crate::rpc::RequestStreamFrame;
 use futures::stream::{Stream as FutureStream};
 use signal_hook::iterator::Signals;
-use atomic_refcell::AtomicRefCell;
 use parking_lot::RwLock;
 
 #[global_allocator]
@@ -655,7 +653,7 @@ fn main() {
         pull_streams: Vec<StdResult<Stream, Status>>,
     }
 
-    let user_shutdown = Signals::new(&[
+    let sig_shutdown = Signals::new(&[
             signal_hook::SIGINT,
             signal_hook::SIGTERM])
         .unwrap()
@@ -672,14 +670,16 @@ fn main() {
         .map_err(|e| error!("error in signal handler: {:?}", e))
         .shared();
 
-    let (shutdown, shutdown_rx) = rcommon::futures::signal();
+    let (_shutdown, shutdown_rx) = rcommon::futures::signal();
 
     let shutdown_rx = shutdown_rx
-        .select(user_shutdown.clone().map_all_unit())
+        .select(sig_shutdown.clone().map_all_unit())
         .map_all_unit()
         .shared();
 
-    tokio::run(rpc::server::serve("0.0.0.0:4820".parse().unwrap(), Default::default(),
+    tokio::run(rpc::server::serve("0.0.0.0:4820".parse().unwrap(),
+        Default::default(),
+        shutdown_rx.clone().map_all_unit(),
         || Ok(Arc::new(Mutex::new(Context { pull_streams: Vec::new() }))),
         clone!(node => move |ctx, req: Request, stream| {
             match req.request.unwrap() {
@@ -706,7 +706,6 @@ fn main() {
             }
 
         }))
-        .select(shutdown_rx.clone().map_all_unit().map(|_| info!("shutting down RPC server 0.0.0.0:4820")))
         .map_all_unit()
     );
 

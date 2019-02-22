@@ -28,6 +28,7 @@ num-traits = "0.2"
 parking_lot = "0.7"
 prost = "0.4"
 signal-hook = { version = "0.1", features = ["tokio-support"] }
+stream-cancel = "0.4"
 threadpool = "1.7"
 tk-listen = "0.2"
 tokio = "0.1"
