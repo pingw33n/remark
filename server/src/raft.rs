@@ -2,9 +2,10 @@ use log::*;
 use std::time::Instant;
 
 use rlog::message::Id;
+use tokio::prelude::*;
 
 use crate::error::*;
-use crate::rpc::EndpointClient;
+use crate::rpc::client::EndpointClient;
 
 struct Candidate {
     timestamp: Instant,
@@ -84,8 +85,8 @@ impl Cluster {
 
         for node in &self.nodes {
             if node.id != self.node_id {
-                let resp: Result<rproto::Response> = node.client.ask(&rproto::Request {
-                    request: Some(rproto::request::Request::AskVote(Request {
+                let resp: Result<rproto::Response> = node.client.ask(
+                    Request {
                         term: self.term,
                         node_id: self.node_id,
                         last_entry: self.last_entry.map(|(id, term)| request::Entry {
@@ -94,8 +95,7 @@ impl Cluster {
                         }),
                         topic_id: self.topic_id.clone(),
                         partition_id: self.partition_id,
-                    })),
-                });
+                    }).wait();
                 match resp {
                     Ok(resp) => {
                         if let rproto::response::Response::AskVote(resp) = resp.response.unwrap() {

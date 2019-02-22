@@ -17,11 +17,9 @@ message Request {
 }
 
 message Response {
-    message Entry {
-        common.Status status = 1;
-    }
     message Stream {
-        repeated Entry entries = 1;
+        common.Status status = 1;
+        uint32 successful_entry_count = 2;
     }
     common.Response common = 1;
     repeated Stream streams = 2;

@@ -10,13 +10,11 @@ extern crate remark_proto as rproto;
 mod error;
 mod raft;
 mod rpc;
-mod rpc2;
 
 use prost::{Message as PMessage};
 use std::collections::HashMap;
 use std::io::prelude::*;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use rcommon::clone;
 use rlog::entry::{BufEntry, BufEntryBuilder};
@@ -26,7 +24,6 @@ use rproto::*;
 use parking_lot::Mutex;
 use rproto::common::Status;
 use std::result::{Result as StdResult};
-use std::time::{Duration, Instant};
 use num_traits::cast::ToPrimitive;
 use std::path::PathBuf;
 use std::fs;
@@ -35,8 +32,20 @@ use uuid::Uuid;
 use log::*;
 use crate::error::*;
 pub use rproto::cluster::partition::{Kind as PartitionKind};
-use crate::rpc::{Endpoint, RequestSession, Rpc};
+use rpc::Endpoint;
 use rcommon::util::OptionResultExt;
+use crate::rpc::ResponseStreamFrame;
+use crate::rpc::client::EndpointClient;
+use futures::Future;
+use tokio::prelude::*;
+use rproto::Request;
+use crate::rpc::server::HandlerResult;
+use rcommon::futures::FutureExt;
+use crate::rpc::RequestStreamFrame;
+use futures::stream::{Stream as FutureStream};
+use signal_hook::iterator::Signals;
+use atomic_refcell::AtomicRefCell;
+use parking_lot::RwLock;
 
 #[global_allocator]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
@@ -295,7 +304,7 @@ impl Store {
 
 const CLUSTER_METADATA_TOPIC: &'static str = "__cluster";
 
-type NodeHandle = Arc<Mutex<Node>>;
+type NodeHandle = Arc<RwLock<Node>>;
 
 struct Node {
     store: Store,
@@ -305,7 +314,7 @@ struct Node {
 }
 
 impl Node {
-    pub fn bootstrap_cluster<P: AsRef<Path>>(paths: &[P], node_meta: NodeMetadata, rpc: &Rpc) -> Result<Self> {
+    pub fn bootstrap_cluster<P: AsRef<Path>>(paths: &[P], node_meta: NodeMetadata) -> Result<Self> {
         let mut store = Store::open_or_create(paths)
             .context("opening store")?;
 
@@ -374,7 +383,7 @@ impl Node {
                     let mut rc = raft::Cluster::new(my_id, last_entry, tm.id.clone(), pm.id);
                     for nid in &pm.nodes {
                         if let Some(node) = cluster_meta.nodes.get(&nid) {
-                            rc.add_node(node.id, rpc.endpoint_client(Endpoint {
+                            rc.add_node(node.id, EndpointClient::default(Endpoint {
                                 host: node.host.clone(),
                                 port: node.system_port,
                             }));
@@ -399,11 +408,11 @@ impl Node {
         })
     }
 
-    pub fn push(&mut self, topic_id: &str, partition_id: u32, use_timestamps: bool,
+    pub fn push(&self, topic_id: &str, partition_id: u32, use_timestamps: bool,
             entry: &mut BufEntry, buf: &mut Vec<u8>) -> Status {
-        if let Some(topic) = self.store.topics.get_mut(topic_id) {
-            if let Some(partition) = topic.partitions.get_mut(&partition_id) {
-                measure_time::print_time!("push");
+        if let Some(topic) = self.store.topics.get(topic_id) {
+            if let Some(partition) = topic.partitions.get(&partition_id) {
+//                measure_time::print_time!("push");
 
                 let timestamp = if use_timestamps {
                     Some(Timestamp::now())
@@ -452,112 +461,145 @@ struct Stream {
     sent_eos: bool,
 }
 
-fn send_entry_streams(
-    wr: &mut rpc::StreamWriter,
-    streams: &mut Vec<StdResult<Stream, Status>>,
-    timeout: Duration,
-    limit_bytes: usize)
-    -> Result<()>
-{
-    for stream in streams.iter_mut() {
-        if let Ok(stream) = stream {
-            stream.sent_eos = false;
-        }
-    }
-
-    let mut last_activity = Instant::now();
-    let mut first_pass = true;
-    loop {
-        let mut done = true;
-
-        let now = Instant::now();
-        for (stream_id, stream) in streams.iter_mut().enumerate() {
-            if let Err(err) = stream {
-                if first_pass {
-                    let err = err.clone();
-                    dbg!(err);
-                    wr.write(stream_id as u32, err, None)?;
-                }
-                continue;
-            }
-            let stream = stream.as_mut().unwrap();
-            if stream.sent_eos {
-                continue;
-            }
-            if timeout > Duration::from_millis(0) && now - last_activity >= timeout
-                || wr.written() >= limit_bytes
-            {
-                wr.write(stream_id as u32, Status::EndOfStream, None)?;
-                stream.sent_eos = true;
-                continue;
-            }
-            match stream.iter.next() {
-                Some(Ok(_)) => {
-                    dbg!(stream_id);
-                    stream.iter.complete_read().unwrap();
-                    wr.write(stream_id as u32, Status::Ok, Some(stream.iter.buf()))?;
-                    done = false;
-                },
-                None => if timeout == Duration::from_millis(0) {
-                    wr.write(stream_id as u32, Status::EndOfStream, None)?;
-                    stream.sent_eos = true;
-                }
-                Some(Err(e)) => {
-                    error!("{}", e);
-                    wr.write(stream_id as u32, Status::UnknownError, None)?;
-                    stream.sent_eos = true;
-                }
-            }
-            last_activity = now;
-        }
-
-        if done {
-            break;
-        }
-
-        first_pass = false;
-    }
-
-    Ok(())
-}
-
-//fn handle_push_request(
-//    req: rproto::push::Request,
-//    mut session: RequestSession,
-//    node: &NodeHandle)
+//fn send_entry_streams(
+//    wr: &mut rpc::StreamWriter,
+//    streams: &mut Vec<StdResult<Stream, Status>>,
+//    timeout: Duration,
+//    limit_bytes: usize)
 //    -> Result<()>
 //{
-//    use rproto::push::*;
-//    let mut resp = Response::default();
-//    resp.common = Some(rproto::common::Response::default());
-//    resp.entries = Vec::with_capacity(req.entries.len());
-//
-//    {
-//        let mut entries = session.read_entries(req.entries.len());
-//        for req_entry in &req.entries {
-//            let status = if let Some(entry) = entries.next() {
-//                let mut entry = entry?;
-//                dbg!(&entry);
-//                let status = node.lock().push(
-//                    &req_entry.topic_id,
-//                    req_entry.partition_id,
-//                    req.flags & remark_proto::push::request::Flags::UseTimestamps as u32 != 0,
-//                    &mut entry,
-//                    entries.buf_mut());
-//                resp.entries.push(response::Entry { status: status.into() });
-//                status
-//            } else {
-//                return session.respond(&rproto::Response { response: Some(rproto::response::Response::Push(Response::empty(Status::BadRequest))) });
-//            };
-//            if status != Status::Ok {
-//                resp.common.as_mut().unwrap().status = Status::InnerErrors.into();
-//            }
+//    for stream in streams.iter_mut() {
+//        if let Ok(stream) = stream {
+//            stream.sent_eos = false;
 //        }
 //    }
-//    session.respond(&rproto::Response {
-//        response: Some(rproto::response::Response::Push(resp)),
-//    })
+//
+//    let mut last_activity = Instant::now();
+//    let mut first_pass = true;
+//    loop {
+//        let mut done = true;
+//
+//        let now = Instant::now();
+//        for (stream_id, stream) in streams.iter_mut().enumerate() {
+//            if let Err(err) = stream {
+//                if first_pass {
+//                    let err = err.clone();
+//                    dbg!(err);
+//                    wr.write(stream_id as u32, err, None)?;
+//                }
+//                continue;
+//            }
+//            let stream = stream.as_mut().unwrap();
+//            if stream.sent_eos {
+//                continue;
+//            }
+//            if timeout > Duration::from_millis(0) && now - last_activity >= timeout
+//                || wr.written() >= limit_bytes
+//            {
+//                wr.write(stream_id as u32, Status::EndOfStream, None)?;
+//                stream.sent_eos = true;
+//                continue;
+//            }
+//            match stream.iter.next() {
+//                Some(Ok(_)) => {
+//                    dbg!(stream_id);
+//                    stream.iter.complete_read().unwrap();
+//                    wr.write(stream_id as u32, Status::Ok, Some(stream.iter.buf()))?;
+//                    done = false;
+//                },
+//                None => if timeout == Duration::from_millis(0) {
+//                    wr.write(stream_id as u32, Status::EndOfStream, None)?;
+//                    stream.sent_eos = true;
+//                }
+//                Some(Err(e)) => {
+//                    error!("{}", e);
+//                    wr.write(stream_id as u32, Status::UnknownError, None)?;
+//                    stream.sent_eos = true;
+//                }
+//            }
+//            last_activity = now;
+//        }
+//
+//        if done {
+//            break;
+//        }
+//
+//        first_pass = false;
+//    }
+//
+//    Ok(())
 //}
+
+fn handle_push_request(
+    req: rproto::push::Request,
+    stream: BoxStream<RequestStreamFrame>,
+    node: NodeHandle)
+    -> impl Future<Item=HandlerResult, Error=Error>
+{
+    use rproto::push::*;
+
+    let mut resp = Response::default();
+    resp.common = Some(rproto::common::Response::default());
+    resp.streams = req.streams.iter()
+        .map(|_| response::Stream::default())
+        .collect();
+
+    stream
+        .fold(resp, move |mut resp, RequestStreamFrame { stream_id, mut payload }| {
+            let stream_id = stream_id as usize;
+            if stream_id >= req.streams.len() {
+                warn!("got stream with stream_id={} which is higher than the max defined stream_id={:?}",
+                    stream_id, req.streams.len().checked_sub(1));
+                resp.common.as_mut().unwrap().status = Status::BadRequest.into();
+                resp.streams.clear();
+                return future::ok(resp).into_box();
+            }
+
+            if resp.streams[stream_id].status != Status::Ok.into() {
+                trace!("[{}] skipping entry for a failed", stream_id);
+                return future::ok(resp).into_box();
+            }
+
+            let mut entry = match BufEntry::decode(&payload) {
+                Ok(Some(v)) => v,
+                Ok(None) => {
+                    warn!("[{}] entry is truncated", stream_id);
+                    resp.common.as_mut().unwrap().status = Status::InnerErrors.into();
+                    resp.streams[stream_id].status = Status::BadEntry.into();
+                    return future::ok(resp).into_box();
+                }
+                Err(e) => {
+                    warn!("[{}] entry is malformed: {:?}", stream_id, e);
+                    resp.common.as_mut().unwrap().status = Status::InnerErrors.into();
+                    resp.streams[stream_id].status = Status::BadEntry.into();
+                    return future::ok(resp).into_box();
+                }
+            };
+
+            let req_stream = req.streams[stream_id].clone();
+            let req_flags = req.flags;
+            future::poll_fn(clone!(node => move || {
+                Ok(tokio_threadpool::blocking(|| {
+                    node.read().push(
+                        &req_stream.topic_id,
+                        req_stream.partition_id,
+                        req_flags & remark_proto::push::request::Flags::UseTimestamps as u32 != 0,
+                        &mut entry,
+                        &mut payload)
+                }).unwrap())
+            })).and_then(move |status| {
+                trace!("[{}] status={:?}", stream_id, status);
+                resp.streams[stream_id].status = status.into();
+                if status == Status::Ok {
+                    resp.streams[stream_id].successful_entry_count += 1;
+                } else {
+                    resp.common.as_mut().unwrap().status = Status::InnerErrors.into();
+                }
+                Ok(resp)
+            }).into_box()
+        })
+        .map(|resp| HandlerResult::new(resp))
+}
 
 fn main() {
     env_logger::Builder::from_default_env()
@@ -579,31 +621,19 @@ fn main() {
         })
         .init();
 
-    {
-        rpc2::foo();
-        return;
-    }
-
     let mut b = BufEntryBuilder::dense();
 //    b.compression(remark_log::entry::Codec::Lz4);
-    while b.get_frame_len() < 4096 {
+    while b.get_frame_len() < 100 {
         b.message(MessageBuilder { value: Some(format!("test {}", b.get_frame_len()).into()), ..Default::default() });
     }
     dbg!(b.message_count());
     let (_, buf) = b.build();
-    std::fs::File::create("/tmp/rementry.bin").unwrap().write_all(&buf).unwrap();
+    std::fs::File::create("/tmp/rementry_small.bin").unwrap().write_all(&buf).unwrap();
 
     BufEntry::decode(&buf).unwrap().unwrap().validate_body(&buf,
         remark_log::entry::ValidBody { dense: true, without_timestamp: true } ).unwrap();
 
-    let shutdown = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::SIGINT, shutdown.clone()).unwrap();
-    signal_hook::flag::register(signal_hook::SIGTERM, shutdown.clone()).unwrap();
-    signal_hook::flag::register(signal_hook::SIGQUIT, shutdown.clone()).unwrap();
-
-    let rpc = Rpc::new(Default::default());
-
-    let node = Arc::new(Mutex::new(Node::bootstrap_cluster(&[
+    let node = Arc::new(RwLock::new(Node::bootstrap_cluster(&[
         "/tmp/remark/dir1",
         "/tmp/remark/dir2",
     ], NodeMetadata {
@@ -612,13 +642,12 @@ fn main() {
         host: "localhost".into(),
         port: 4820,
         system_port: 4821,
-    }, &rpc).unwrap()));
+    }).unwrap()));
 
-    if !node.lock().store.is_partition_exists("topic1", 0) {
-        node.lock().store.create_partition("topic1", 0).unwrap();
-    }
-    if !node.lock().store.is_partition_exists("topic1", 1) {
-        node.lock().store.create_partition("topic1", 1).unwrap();
+    for i in 0..8 {
+        if !node.read().store.is_partition_exists("topic1", i) {
+            node.write().store.create_partition("topic1", i).unwrap();
+        }
     }
 
     #[derive(Default)]
@@ -626,56 +655,111 @@ fn main() {
         pull_streams: Vec<StdResult<Stream, Status>>,
     }
 
-    crate::rpc::serve("0.0.0.0:4820", shutdown, Default::default(),
-    || Ok(Context::default()),
-    clone!(node => move |ctx: &mut Context, req: Request, session: RequestSession| {
-        measure_time::print_time!("session");
+    let user_shutdown = Signals::new(&[
+            signal_hook::SIGINT,
+            signal_hook::SIGTERM])
+        .unwrap()
+        .into_async()
+        .unwrap()
+        .into_future()
+        .map(|(sig, _)| info!("{} received",
+            match sig {
+                Some(signal_hook::SIGINT) => "SIGINT",
+                Some(signal_hook::SIGTERM) => "SIGTERM",
+                _ => "<unexpected signal>"
+            }
+        ))
+        .map_err(|e| error!("error in signal handler: {:?}", e))
+        .shared();
 
-        if req.request.is_none() {
-            return Err(Error::new(ErrorId::Todo, "invalid request"));
-        }
+    let (shutdown, shutdown_rx) = rcommon::futures::signal();
 
-        match req.request.unwrap() {
-            request::Request::Pull(req) => {
-                ctx.pull_streams.clear();
-                for req_stream in &req.streams {
-                    let stream = node.lock().pull(&req_stream.topic_id,
-                            req_stream.partition_id, Id::new(req_stream.message_id))
-                        .map(|iter| Stream { iter, sent_eos: false });
-                    ctx.pull_streams.push(stream);
+    let shutdown_rx = shutdown_rx
+        .select(user_shutdown.clone().map_all_unit())
+        .map_all_unit()
+        .shared();
+
+    tokio::run(rpc::server::serve("0.0.0.0:4820".parse().unwrap(), Default::default(),
+        || Ok(Arc::new(Mutex::new(Context { pull_streams: Vec::new() }))),
+        clone!(node => move |ctx, req: Request, stream| {
+            match req.request.unwrap() {
+                rproto::request::Request::Push(req) => {
+                    handle_push_request(req, stream, node.clone())
                 }
-
-                let timeout = Duration::from_millis(req.timeout_millis as u64);
-                let limit_bytes = req.per_stream_limit_bytes.to_usize().unwrap();
-
-                let ref mut stream_wr = session.respond_with_stream(&Response {
-                    response: Some(response::Response::Pull(
-                        pull::Response {
-                            common: Some(common::Response { status: Status::Ok.into() }),
-                        }))
-                })?;
-                send_entry_streams(stream_wr, &mut ctx.pull_streams, timeout, limit_bytes)?;
+//                rproto::request::Request::Pull(req) => {
+//                    future::ok(server::HandlerResult::with_stream(
+//                        rproto::pull::Response {
+//                            common: Some(rproto::common::Response { status: Status::Ok.into() }),
+//                        },
+//                        stream::iter_ok(vec![
+//                            ResponseStreamFrame { stream_id: 0, payload: Ok(vec![3, 2, 3, 4]) },
+////                            (0, Ok(vec![3, 2, 3, 4])),
+////                            (1, Ok(vec![2, 5, 6])),
+////                            (0, Ok(vec![0])),
+////                            (1, Ok(vec![2, 7, 8])),
+//                            ResponseStreamFrame { stream_id: 0, payload: Err(Status::EndOfStream) },
+////                            (1, Err(Status::EndOfStream)),
+//                        ]).into_box()
+//                    )).into_box()
+//                }
+                _ => unimplemented!()
             }
-            request::Request::PullMore(req) => {
-                let timeout = Duration::from_millis(req.timeout_millis as u64);
-                let limit_bytes = req.per_stream_limit_bytes.to_usize().unwrap();
 
-                let ref mut stream_wr = session.respond_with_stream(&Response {
-                    response: Some(response::Response::PullMore(
-                        pull_more::Response {
-                            common: Some(common::Response { status: Status::Ok.into() }),
-                        }))
-                })?;
-                send_entry_streams(stream_wr, &mut ctx.pull_streams, timeout, limit_bytes)?;
-            }
-            request::Request::Push(req) => {
+        }))
+        .select(shutdown_rx.clone().map_all_unit().map(|_| info!("shutting down RPC server 0.0.0.0:4820")))
+        .map_all_unit()
+    );
+
+//    crate::rpc::serve("0.0.0.0:4820", shutdown, Default::default(),
+//    || Ok(Context::default()),
+//    clone!(node => move |ctx: &mut Context, req: Request, session: RequestSession| {
+//        measure_time::print_time!("session");
+//
+//        if req.request.is_none() {
+//            return Err(Error::new(ErrorId::Todo, "invalid request"));
+//        }
+//
+//        match req.request.unwrap() {
+//            request::Request::Pull(req) => {
+//                ctx.pull_streams.clear();
+//                for req_stream in &req.streams {
+//                    let stream = node.lock().pull(&req_stream.topic_id,
+//                            req_stream.partition_id, Id::new(req_stream.message_id))
+//                        .map(|iter| Stream { iter, sent_eos: false });
+//                    ctx.pull_streams.push(stream);
+//                }
+//
+//                let timeout = Duration::from_millis(req.timeout_millis as u64);
+//                let limit_bytes = req.per_stream_limit_bytes.to_usize().unwrap();
+//
+//                let ref mut stream_wr = session.respond_with_stream(&Response {
+//                    response: Some(response::Response::Pull(
+//                        pull::Response {
+//                            common: Some(common::Response { status: Status::Ok.into() }),
+//                        }))
+//                })?;
+//                send_entry_streams(stream_wr, &mut ctx.pull_streams, timeout, limit_bytes)?;
+//            }
+//            request::Request::PullMore(req) => {
+//                let timeout = Duration::from_millis(req.timeout_millis as u64);
+//                let limit_bytes = req.per_stream_limit_bytes.to_usize().unwrap();
+//
+//                let ref mut stream_wr = session.respond_with_stream(&Response {
+//                    response: Some(response::Response::PullMore(
+//                        pull_more::Response {
+//                            common: Some(common::Response { status: Status::Ok.into() }),
+//                        }))
+//                })?;
+//                send_entry_streams(stream_wr, &mut ctx.pull_streams, timeout, limit_bytes)?;
+//            }
+//            request::Request::Push(req) => {
 //                handle_push_request(req, session, &node)?;
-            }
-            request::Request::AskVote(req) => {
-                session.respond(&node.lock().ask_vote(req).into())?;
-            }
-        }
-
-        Ok(())
-    })).unwrap().join().unwrap();
+//            }
+//            request::Request::AskVote(req) => {
+//                session.respond(&node.lock().ask_vote(req).into())?;
+//            }
+//        }
+//
+//        Ok(())
+//    })).unwrap().join().unwrap();
 }

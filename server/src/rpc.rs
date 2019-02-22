@@ -1,27 +1,26 @@
-use crossbeam_utils::thread;
-use log::*;
-use parking_lot::Mutex;
+pub mod client;
+pub mod server;
+
+use atomic_refcell::AtomicRefCell;
 use prost::Message;
-use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::io::prelude::*;
-use std::net::*;
+use std::net::{IpAddr, SocketAddr};
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::{sleep, JoinHandle};
-use std::time::Duration;
+use tokio::net::TcpStream;
+use tokio::prelude::*;
 
-use rcommon::{clone, contain};
 use rcommon::bytes::*;
-use rcommon::error::ResultExt;
-use rcommon::util::*;
-use rcommon::varint::{self, ReadExt, WriteExt};
-use rlog::entry::BufEntry;
-use rproto::common::{Status, ResponseStreamFrameHeader};
-use rproto::{Request, Response};
+use rcommon::futures::FutureExt;
+use rcommon::varint::{self, WriteExt};
+use crate::error::BoxStream;
 
-use crate::error::*;
+const MAX_PB_MESSAGE_LEN: u32 = 65535;
+
+pub type RequestStream = BoxStream<RequestStreamFrame>;
+pub type ResponseStream = BoxStream<ResponseStreamFrame>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IpVersion {
@@ -50,367 +49,214 @@ impl fmt::Debug for Endpoint {
     }
 }
 
-struct ClientInner {
-    options: ClientOptions,
-    host_cache: HashMap<String, IpAddr>,
-    connections: HashMap<Endpoint, Vec<TcpStream>>,
+pub struct RequestStreamFrame {
+    pub stream_id: u32,
+    pub payload: Vec<u8>,
 }
 
-impl ClientInner {
-    pub fn new_wrapped(options: ClientOptions) -> Arc<Mutex<Self>> {
-        Arc::new(Mutex::new(Self {
-            options,
-            host_cache: HashMap::new(),
-            connections: HashMap::new(),
-        }))
+pub struct ResponseStreamFrame {
+    pub stream_id: u32,
+    pub payload: std::result::Result<Vec<u8>, rproto::common::Status>,
+}
+
+struct ShexAsyncRead<T>(Arc<AtomicRefCell<T>>);
+
+impl<T: AsyncRead> ShexAsyncRead<T> {
+    pub fn new(inner: T) -> Self {
+        Self(Arc::new(AtomicRefCell::new(inner)))
+    }
+}
+
+impl<T: Read> Read for ShexAsyncRead<T> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.borrow_mut().read(buf)
+    }
+}
+
+impl<T: AsyncRead> AsyncRead for ShexAsyncRead<T> {}
+
+impl<T> Clone for ShexAsyncRead<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+struct ShexAsyncWrite<T>(Arc<AtomicRefCell<T>>);
+
+impl<T: AsyncWrite> ShexAsyncWrite<T> {
+    pub fn new(inner: T) -> Self {
+        Self(Arc::new(AtomicRefCell::new(inner)))
+    }
+}
+
+impl<T: Write> Write for ShexAsyncWrite<T> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.borrow_mut().write(buf)
     }
 
-    pub fn ask(&mut self, endpoint: Endpoint, req: &Request) -> Result<Response>
-    {
-        trace!("asking {:?} with {:#?}", endpoint, req);
-        let mut conn = self.acquire_conn(endpoint)?;
-        let r = (|| {
-            write_pb_frame(&mut conn.conn, req).wrap_err_id(ErrorId::Io)?;
-            read_pb_frame(&mut conn.conn).wrap_err_id(ErrorId::Io)
-        })();
-        trace!("got response: {:#?}", r);
-        self.release_conn(conn);
-        r
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.borrow_mut().flush()
     }
+}
 
-    fn acquire_conn(&mut self, endpoint: Endpoint) -> Result<LeasedConnection> {
-        loop {
-            if let Some(conns) = self.connections.get_mut(&endpoint) {
-                let conn = if conns.is_empty() {
-                    Self::new_connection(&mut self.host_cache, &endpoint, &self.options)?
-                } else {
-                    let idx = conns.len() - 1;
-                    conns.remove(idx)
-                };
-                break Ok(LeasedConnection {
-                    endpoint,
-                    conn,
-                });
-            }
-            self.connections.insert(endpoint.clone(), Vec::new());
+impl<T: AsyncWrite> AsyncWrite for ShexAsyncWrite<T> {
+    fn shutdown(&mut self) -> Poll<(), io::Error> {
+        self.0.borrow_mut().shutdown()
+    }
+}
+
+impl<R> Clone for ShexAsyncWrite<R> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SocketIdDebug {
+    peer_addr: Option<SocketAddr>,
+    raw_fd: RawFd,
+}
+
+impl fmt::Debug for SocketIdDebug {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if let Some(peer_addr) = self.peer_addr {
+            write!(f, "{}#{:?}", peer_addr, self.raw_fd)
+        } else {
+            write!(f, "?#{:?}", self.raw_fd)
         }
     }
+}
 
-    fn release_conn(&mut self, conn: LeasedConnection) {
+fn socket_id_debug(socket: &TcpStream) -> SocketIdDebug {
+    SocketIdDebug {
+        peer_addr: socket.peer_addr().ok(),
+        raw_fd: socket.as_raw_fd(),
+    }
+}
+
+struct ReadVarint<R> {
+    rd: Option<R>,
+    v: u64,
+    len: usize,
+}
+
+impl<R: AsyncRead> Future for ReadVarint<R> {
+    type Item = (R, u64, usize);
+    type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        let mut b = [0];
         loop {
-            if let Some(conns) = self.connections.get_mut(&conn.endpoint) {
-                conns.push(conn.conn);
+            let read = futures::try_ready!(self.rd.as_mut().unwrap().poll_read(&mut b));
+            if read == 0 {
+                return if self.len > 0 {
+                    Err(io::Error::new(io::ErrorKind::UnexpectedEof,
+                        "unexpected eof while reading varint"))
+                } else {
+                    Ok(Async::Ready((self.rd.take().unwrap(), 0, 0)))
+                };
+            }
+            if b[0] & 0x80 != 0 {
+                self.v |= ((b[0] & 0x7f) as u64) << (self.len * 7);
+                self.len += 1;
+            } else {
+                self.v |= (b[0] as u64) << (self.len * 7);
+                self.len += 1;
                 break;
             }
-            self.connections.insert(conn.endpoint.clone(), Vec::new());
-        }
-    }
-
-    fn new_connection(host_cache: &mut HashMap<String, IpAddr>, endpoint: &Endpoint,
-        options: &ClientOptions)
-        -> Result<TcpStream>
-    {
-        let addr = Self::resolve_hostname(host_cache, &endpoint.host, options.prefer_ipv)?;
-        let sock_addr = match addr {
-            IpAddr::V4(a) => SocketAddr::V4(SocketAddrV4::new(a, endpoint.port)),
-            IpAddr::V6(a) => SocketAddr::V6(SocketAddrV6::new(a, endpoint.port, 0, 0)),
-        };
-        let conn = if let Some(timeout) = options.connect_timeout {
-            TcpStream::connect_timeout(&sock_addr, timeout)
-        } else {
-            TcpStream::connect(&sock_addr)
-        }.wrap_err_id(ErrorId::Io)?;
-        conn.set_read_timeout(options.read_timeout).wrap_err_id(ErrorId::Io)?;
-        conn.set_write_timeout(options.write_timeout).wrap_err_id(ErrorId::Io)?;
-        Ok(conn)
-    }
-
-    fn resolve_hostname(host_cache: &mut HashMap<String, IpAddr>, hostname: &str,
-        prefer_ipv: Option<IpVersion>)
-        -> Result<IpAddr>
-    {
-        if let Some(addr) = host_cache.get_mut(hostname) {
-            return Ok(*addr);
-        }
-        let addr = (hostname, 0).to_socket_addrs().wrap_err_id(ErrorId::Todo)?
-            .map(|a| a.ip())
-            .filter(|a| prefer_ipv.is_none() || prefer_ipv.unwrap() == IpVersion::of_addr(a))
-            .next()
-            .ok_or_else(|| Error::new(ErrorId::Todo, format!(
-                "couldn't resolve hostname `{}`", hostname)))?;
-        host_cache.insert(hostname.to_owned(), addr);
-
-        Ok(addr)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClientOptions {
-    pub prefer_ipv: Option<IpVersion>,
-    pub connect_timeout: Option<Duration>,
-    pub read_timeout: Option<Duration>,
-    pub write_timeout: Option<Duration>,
-}
-
-impl Default for ClientOptions {
-    fn default() -> Self {
-        Self {
-            prefer_ipv: None,
-            connect_timeout: Some(Duration::from_secs(15)),
-            read_timeout: Some(Duration::from_secs(15)),
-            write_timeout: Some(Duration::from_secs(15)),
-        }
-    }
-}
-
-pub struct Rpc {
-    client: Arc<Mutex<ClientInner>>,
-}
-
-impl Rpc {
-    pub fn new(options: ClientOptions) -> Self {
-        Self {
-            client: ClientInner::new_wrapped(options),
-        }
-    }
-
-    pub fn client(&self) -> Client {
-        Client {
-            inner: self.client.clone(),
-        }
-    }
-
-    pub fn endpoint_client(&self, endpoint: Endpoint) -> EndpointClient {
-        EndpointClient {
-            client: self.client(),
-            endpoint,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct Client {
-    inner: Arc<Mutex<ClientInner>>,
-}
-
-impl Client {
-    pub fn ask(&self, endpoint: Endpoint, req: &Request) -> Result<Response>
-    {
-        self.inner.lock().ask(endpoint, req)
-    }
-}
-
-#[derive(Clone)]
-pub struct EndpointClient {
-    client: Client,
-    endpoint: Endpoint,
-}
-
-impl EndpointClient {
-    pub fn ask(&self, req: &Request) -> Result<Response>
-    {
-        self.client.ask(self.endpoint.clone(), req)
-    }
-}
-
-struct LeasedConnection {
-    endpoint: Endpoint,
-    conn: TcpStream,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ServerOptions {
-    pub read_timeout: Option<Duration>,
-    pub write_timeout: Option<Duration>,
-}
-
-impl Default for ServerOptions {
-    fn default() -> Self {
-        Self {
-            read_timeout: Some(Duration::from_secs(15)),
-            write_timeout: Some(Duration::from_secs(15)),
-        }
-    }
-}
-
-pub fn serve<Req, Addr, Ctx, OnConnect, Handler>(
-    addr: Addr,
-    shutdown: Arc<AtomicBool>,
-    options: ServerOptions,
-    on_connect: OnConnect,
-    handler: Handler)
-    -> Result<JoinHandle<()>>
-    where
-        Req: Default + Message,
-        Addr: 'static + ToSocketAddrs + fmt::Display + Send + Clone,
-        OnConnect: 'static + Send + Sync + Fn() -> Result<Ctx>,
-        Handler: 'static + Send + Sync + Fn(&mut Ctx, Req, RequestSession) -> Result<()>,
-{
-    let listener = TcpListener::bind(addr.clone()).wrap_err_id(ErrorId::Io)?;
-    listener.set_nonblocking(true).wrap_err_id(ErrorId::Io)?;
-
-    let handle = std::thread::spawn(clone!(shutdown => move || {
-        thread::scope(|s| {
-            info!("started server at {}", addr);
-            for conn in listener.incoming() {
-                match conn {
-                    Ok(mut conn) => {
-                        let options = &options;
-                        let on_connect = &on_connect;
-                        let handler = &handler;
-                        s.spawn(move |_| {
-                            let peer_addr = conn.peer_addr().unwrap();
-                            if let Err(e) = contain! { Result<()>;
-                                debug!("[{}] new connection", peer_addr);
-
-                                conn.set_nonblocking(false).wrap_err_id(ErrorId::Io)?;
-                                conn.set_read_timeout(options.read_timeout).wrap_err_id(ErrorId::Io)?;
-                                conn.set_write_timeout(options.write_timeout).wrap_err_id(ErrorId::Io)?;
-
-                                let mut ctx = on_connect()?;
-
-                                loop {
-                                    let message = read_pb_frame(&mut conn).wrap_err_id(ErrorId::Todo)?;
-                                    debug!("[{}] {:#?}", peer_addr, message);
-                                    let session = RequestSession { conn: &mut conn };
-                                    handler(&mut ctx, message, session)?;
-                                }
-                            } {
-                                error!("[{}] error serving RPC request: {}", peer_addr, e);
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        if e.kind() == io::ErrorKind::WouldBlock {
-                            if shutdown.load(Ordering::Relaxed) {
-                                info!("shutting down RPC server at {}", addr);
-                                return;
-                            }
-                        } else {
-                            error!("error while serving on {}: {}", addr, e);
-                        }
-                        sleep(Duration::from_millis(100));
-                    }
-                }
+            if self.len == 8 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData,
+                    "decoded varint value is to big to fit in u64"));
             }
-        }).unwrap();
-    }));
-
-    Ok(handle)
-}
-
-pub struct RequestSession<'a> {
-    conn: &'a mut TcpStream,
-}
-
-impl<'a> RequestSession<'a> {
-    pub fn read_entries(&mut self, count: usize) -> EntryReader {
-        EntryReader {
-            conn: self.conn,
-            left: count,
-            buf: Vec::new(),
         }
+        Ok(Async::Ready((self.rd.take().unwrap(), self.v, self.len)))
     }
+}
 
-    pub fn respond(mut self, response: &Response) -> Result<()> {
-        self.write_response(response)
+fn read_varint<R: AsyncRead>(rd: R) -> ReadVarint<R> {
+    ReadVarint {
+        rd: Some(rd),
+        v: 0,
+        len: 0,
     }
+}
 
-    pub fn respond_with_stream(mut self, response: &Response) -> Result<StreamWriter<'a>> {
-        self.write_response(response)?;
-        Ok(StreamWriter {
-            session: self,
-            written: 0,
+fn try_read_pb_frame<M, R>(rd: R) -> impl Future<Item=(R, Option<M>), Error=io::Error>
+    where M: 'static + Default + Message + Send,
+          R: 'static + AsyncRead + Send,
+{
+    read_varint(rd)
+        .and_then(|(rd, len, read_count)| if len > MAX_PB_MESSAGE_LEN as u64 {
+            Err(io::Error::new(io::ErrorKind::InvalidData,
+                format!("protobuf message is too big: {}", len)))
+        } else {
+            Ok((rd, len, read_count))
         })
-    }
-
-    fn write_response(&mut self, response: &Response) -> Result<()> {
-        debug!("[{}] {:#?}", self.conn.peer_addr().unwrap(), response);
-        write_pb_frame(self.conn, response)
-            .wrap_err_id(ErrorId::Io)
-            .map(|_| {})
-    }
+        .and_then(|(rd, len, read_count)| {
+            if read_count > 0 {
+                let mut buf = Vec::new();
+                buf.ensure_len_zeroed(len as usize);
+                tokio::io::read_exact(rd, buf)
+                    .and_then(|(rd, buf)| {
+                        M::decode(&buf)
+                            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData,
+                                format!("malformed protobuf message: {}", e)))
+                            .map(|m| (rd, Some(m)))
+                    })
+                    .into_box()
+            } else {
+                future::ok::<_, io::Error>((rd, None)).into_box()
+            }
+        })
 }
 
-pub struct EntryReader<'a> {
-    conn: &'a mut TcpStream,
-    buf: Vec<u8>,
-    left: usize,
+fn read_pb_frame<M, R>(rd: R) -> impl Future<Item=(R, M), Error=io::Error>
+    where M: 'static + Default + Message + Send,
+          R: 'static + AsyncRead + Send,
+{
+    try_read_pb_frame(rd)
+        .and_then(|(rd, m)| Ok((rd, m.ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof,
+            "unexpected eof while reading protobuf frame"))?)))
 }
 
-impl EntryReader<'_> {
-    pub fn buf(&self) -> &[u8] {
-        &self.buf
-    }
-
-    pub fn buf_mut(&mut self) -> &mut Vec<u8> {
-        &mut self.buf
-    }
+fn read_stream_frame_payload<R>(rd: R, max_len: usize)
+    -> impl Future<Item=(R, Vec<u8>, ), Error=io::Error>
+    where R: 'static + AsyncRead + Send,
+{
+    tokio::io::read_exact(rd, [0; 4])
+        .and_then(move |(rd, len_bytes)| {
+            let len = BigEndian::read_u32(&len_bytes) as usize;
+            if len > max_len {
+                return future::err(io::Error::new(io::ErrorKind::InvalidData,
+                    "stream frame payload is too big")) .into_box()
+            }
+            if len >= 4 {
+                let mut buf = Vec::new();
+                buf.ensure_capacity(len);
+                buf.ensure_len_zeroed(len - 4);
+                tokio::io::read_exact(rd, buf)
+                    // FIXME
+                    .map(move |(rd, mut buf)| {
+                        buf.splice(0..0, len_bytes.iter().cloned());
+                        (rd, buf)
+                    })
+                    .into_box()
+            } else {
+                future::err(io::Error::new(io::ErrorKind::InvalidData, "invalid fixed frame len"))
+                    .into_box()
+            }
+        })
 }
 
-impl Iterator for EntryReader<'_> {
-    type Item = Result<BufEntry>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.left == 0 {
-            return None;
-        }
-        self.buf.clear();
-        BufEntry::read_full(self.conn, &mut self.buf)
-            .wrap_err_id(ErrorId::Todo)
-            .transpose_()
-    }
-}
-
-pub struct StreamWriter<'a> {
-    session: RequestSession<'a>,
-    written: usize,
-}
-
-impl StreamWriter<'_> {
-    pub fn written(&self) -> usize {
-        self.written
-    }
-
-    pub fn write(&mut self, stream_id: u32, status: rproto::common::Status, data: Option<&[u8]>)
-        -> Result<()>
-    {
-        self.write_header(stream_id, status)?;
-
-        if let Some(data) = data {
-            self.session.conn.write_all(data).wrap_err_id(ErrorId::Io)?;
-            self.written = self.written.checked_add(data.len()).unwrap();
-        }
-
-        Ok(())
-    }
-
-    fn write_header(&mut self, stream_id: u32, status: Status) -> Result<()> {
-        let written = write_pb_frame(&mut self.session.conn, &ResponseStreamFrameHeader {
-            stream_id,
-            status: status.into(),
-        }).wrap_err_id(ErrorId::Io)?;
-        self.written = self.written.checked_add(written).unwrap();
-        Ok(())
-    }
-}
-
-fn read_pb_frame<M: Default + Message, R: Read>(rd: &mut R) -> io::Result<M> {
-    let len = rd.read_u32_varint()?;
+fn write_pb_frame<W: AsyncWrite>(wr: W, msg: &impl Message)
+    -> impl Future<Item=(W, usize), Error=io::Error>
+{
+    let msg_len = msg.encoded_len();
     let mut buf = Vec::new();
-    buf.ensure_len_zeroed(len as usize);
-    rd.read_exact(&mut buf)?;
-
-    M::decode(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData,
-        format!("malformed protobuf data: {}", e)))
-}
-
-fn write_pb_frame(wr: &mut Write, msg: &impl Message) -> io::Result<usize> {
-    let len = msg.encoded_len();
-    let mut buf = Vec::new();
-    buf.reserve_exact(varint::encoded_len(len as u64) as usize + len);
-    buf.write_u32_varint(len as u32)?;
+    buf.reserve_exact(varint::encoded_len(msg_len as u64) as usize + msg_len);
+    let frame_len = buf.capacity();
+    buf.write_u32_varint(msg_len as u32).unwrap();
     msg.encode(&mut buf).unwrap();
-    wr.write_all(&buf)?;
-    Ok(len)
+    tokio::io::write_all(wr, buf)
+        .map(move |(wr, _)| (wr, frame_len))
 }

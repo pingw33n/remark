@@ -32,13 +32,32 @@ mod root {
         }
     }
 
-    impl From<super::ask_vote::Response> for Response {
-        fn from(v: super::ask_vote::Response) -> Self {
-            Self {
-                response: Some(response::Response::AskVote(v)),
+    macro_rules! impl_from {
+        ($($a:tt => $b:tt,)*) => {
+            $(impl From<super::$a::Request> for Request {
+                fn from(v: super::$a::Request) -> Self {
+                    Self {
+                        request: Some(request::Request::$b(v)),
+                    }
+                }
             }
-        }
+
+            impl From<super::$a::Response> for Response {
+                fn from(v: super::$a::Response) -> Self {
+                    Self {
+                        response: Some(response::Response::$b(v)),
+                    }
+                }
+            })*
+        };
     }
+
+    impl_from!(
+        ask_vote => AskVote,
+        push => Push,
+        pull => Pull,
+        pull_more => PullMore,
+    );
 }
 pub use root::*;
 

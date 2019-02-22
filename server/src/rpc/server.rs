@@ -1,8 +1,8 @@
 use log::*;
 use std::net::SocketAddr;
-use std::result::{Result as StdResult};
 use std::time::Duration;
 use tk_listen::ListenExt;
+use tokio::net::TcpListener;
 use tokio::prelude::*;
 use tokio::prelude::{FutureExt as TokioFutureExt};
 
@@ -12,62 +12,77 @@ use rproto::common::{Status, ResponseStreamFrameHeader};
 use rproto::{Request, Response};
 
 use crate::error::*;
-use tokio::net::TcpListener;
 
 use super::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ServerOptions {
+pub struct Options {
     pub sleep_on_error: Duration,
     pub max_connections: usize,
-    pub read_timeout: Duration,
-    pub write_timeout: Duration,
+    pub socket_timeout: Duration,
+    pub max_frame_count: u32,
+    pub max_single_payload_len: u32,
+    pub max_total_payload_len: u32,
 }
 
-impl Default for ServerOptions {
+impl Default for Options {
     fn default() -> Self {
         Self {
             sleep_on_error: Duration::from_millis(500),
             max_connections: 10000,
-            read_timeout: Duration::from_secs(30),
-            write_timeout: Duration::from_secs(30),
+            socket_timeout: Duration::from_secs(30),
+            max_frame_count: 1000,
+            max_single_payload_len: 1024 * 1024,
+            max_total_payload_len: u32::max_value(),
         }
     }
 }
 
-pub struct RequestStreamFrame {
-    pub stream_id: u32,
-    pub payload: Vec<u8>,
-}
-
-pub struct ResponseStreamFrame {
-    pub stream_id: u32,
-    pub payload: StdResult<Vec<u8>, Status>,
-}
-
-pub struct HandlerResponse {
+pub struct HandlerResult {
     pub response: Response,
-    pub stream: Option<BoxStream<ResponseStreamFrame>>,
+    pub stream: Option<ResponseStream>,
 }
 
-pub fn serve<Ctx, OnConnect, OnConnectResult, Handler, HandlerResult>(
+impl HandlerResult {
+    pub fn new(response: impl Into<Response>) -> Self {
+        Self {
+            response: response.into(),
+            stream: None,
+        }
+    }
+
+    pub fn with_stream(response: impl Into<Response>, stream: ResponseStream) -> Self {
+        Self {
+            response: response.into(),
+            stream: Some(stream),
+        }
+    }
+}
+
+// FIXME accept shutdown signal that will make it gracefully stop precessing requests at read
+// request boundary.
+pub fn serve<Ctx, OnConnect, OnConnectRes, Handler, HandlerRes>(
     addr: SocketAddr,
-    options: ServerOptions,
+    options: Options,
     on_connect: OnConnect,
     handler: Handler,
     ) -> impl Future<Item=(), Error=()>
     where
         Ctx: Send + 'static,
-        OnConnect: Fn() -> OnConnectResult + Send + 'static,
-        OnConnectResult: IntoFuture<Item=Ctx, Error=Error>,
-        OnConnectResult::Future: Send + 'static,
-        Handler: Fn(&mut Ctx, Request, BoxStream<RequestStreamFrame>)
-            -> HandlerResult + Send + Clone + 'static,
-        HandlerResult: IntoFuture<Item=HandlerResponse, Error=Error>,
-        HandlerResult::Future: Send + 'static,
+        OnConnect: Fn() -> OnConnectRes + Send + 'static,
+        OnConnectRes: IntoFuture<Item=Ctx, Error=Error>,
+        OnConnectRes::Future: Send + 'static,
+        Handler: Fn(&mut Ctx, Request, RequestStream)
+            -> HandlerRes + Send + Clone + 'static,
+        HandlerRes: IntoFuture<Item=HandlerResult, Error=Error>,
+        HandlerRes::Future: Send + 'static,
 {
-    let read_timeout = options.read_timeout;
-    let write_timeout = options.write_timeout;
+    let socket_timeout = options.socket_timeout;
+    let limits = StreamLimits {
+        max_frame_count: options.max_frame_count,
+        max_single_payload_len: options.max_single_payload_len,
+        max_total_payload_len: options.max_total_payload_len,
+    };
     future::lazy(move || {
         info!("starting RPC server at {}", addr);
         let listener = match TcpListener::bind(&addr) {
@@ -77,19 +92,20 @@ pub fn serve<Ctx, OnConnect, OnConnectResult, Handler, HandlerResult>(
                 return future::err(()).into_box();
             }
         };
-        listener.incoming()
+        listener
+            .incoming()
             .sleep_on_error(options.sleep_on_error)
-            .map(move |socket| {
+            .for_each(move |socket| {
                 let sock_id = socket_id_debug(&socket);
                 debug!("[{:?}] new connection", sock_id);
                 let handler = handler.clone();
-                on_connect()
+                tokio::spawn(on_connect()
                     .into_future()
                     .map_err(move |e| error!("[{:?}] error in on_connect(): {:?}", sock_id, e))
                     .and_then(move |mut ctx| {
                         let (rd, wr) = socket.split();
                         let wr = ShexAsyncWrite::new(wr);
-                        read_requests(rd, read_timeout)
+                        read_requests(rd, socket_timeout, limits)
                             .map_err(move |e| error!("[{:?}] error reading request: {:?}", sock_id, e))
                             .for_each(move |(req, stream)| {
                                 trace!("[{:?}] request {}: {:#?}", sock_id,
@@ -104,27 +120,33 @@ pub fn serve<Ctx, OnConnect, OnConnectResult, Handler, HandlerResult>(
                                             if r.stream.is_some() { "with stream " } else { "" },
                                             r.response);
                                         write_pb_frame(wr, &r.response)
-                                            .timeout(write_timeout)
+                                            .timeout(socket_timeout)
                                             .map_err(move |e| error!("[{:?}] error writing response: {:?}", sock_id, e))
                                             .map(move |(wr, _)| (wr, r))
                                     }))
                                     .and_then(move |(wr, r)| {
                                         if let Some(stream) = r.stream {
-                                            write_stream(stream, sock_id, wr, write_timeout).into_box()
+                                            write_response_stream_frames(stream, sock_id, wr, socket_timeout).into_box()
                                         } else {
                                             future::ok(()).into_box()
                                         }
                                     })
                             })
-                    })
+                    }))
             })
-            .listen(options.max_connections)
             .into_box()
     })
 }
 
-fn read_requests<R>(rd: R, timeout: Duration)
-    -> impl Stream<Item=(Request, BoxStream<RequestStreamFrame>), Error=Error>
+#[derive(Clone, Copy)]
+struct StreamLimits {
+    max_frame_count: u32,
+    max_single_payload_len: u32,
+    max_total_payload_len: u32,
+}
+
+fn read_requests<R>(rd: R, timeout: Duration, limits: StreamLimits)
+    -> impl Stream<Item=(Request, RequestStream), Error=Error>
     where R: 'static + AsyncRead + Send + Sync
 {
     let rd = ShexAsyncRead::new(rd);
@@ -136,7 +158,7 @@ fn read_requests<R>(rd: R, timeout: Duration)
                     .and_then(move |(rd, req): (_, Option<Request>)| {
                         Ok(if let Some(req) = req {
                             let stream = if req.has_stream() {
-                                read_sub_stream(rd.clone(), timeout).into_box()
+                                read_request_stream_frames(rd.clone(), timeout, limits).into_box()
                             } else {
                                 stream::empty().into_box()
                             };
@@ -152,12 +174,18 @@ fn read_requests<R>(rd: R, timeout: Duration)
         .filter_map(|r| r)
 }
 
-fn read_sub_stream<R>(rd: R, timeout: Duration)
+fn read_request_stream_frames<R>(rd: R, timeout: Duration, limits: StreamLimits)
     -> impl Stream<Item=RequestStreamFrame, Error=Error>
     where R: 'static + AsyncRead + Send
 {
-    stream::unfold(Some(rd), move |rd| {
-        if let Some(rd) = rd {
+    #[derive(Clone, Copy, Default)]
+    struct State {
+        frame_count: u32,
+        total_payload_len: u32,
+    }
+
+    stream::unfold(Some((rd, State::default())), move |state| {
+        if let Some((rd, state)) = state {
             Some(read_pb_frame::<rproto::common::RequestStreamFrameHeader, _>(rd)
                 .timeout(timeout)
                 .map_err(|e| e.wrap_id(ErrorId::Io))
@@ -165,11 +193,27 @@ fn read_sub_stream<R>(rd: R, timeout: Duration)
                     if sfh.end_of_stream {
                         future::ok((None, None)).into_box()
                     } else {
+                        if state.frame_count == limits.max_frame_count {
+                            return future::err(Error::new(ErrorId::Todo,
+                                "request stream has too many frames"))
+                                .into_box();
+                        }
+
+                        let max_len = (limits.max_total_payload_len - state.total_payload_len)
+                            .min(limits.max_single_payload_len);
+
                         let stream_id = sfh.stream_id;
-                        read_fixed_frame(rd)
+                        read_stream_frame_payload(rd, max_len as usize)
                             .timeout(timeout)
                             .map_err(|e| e.wrap_id(ErrorId::Io))
-                            .map(move |(rd, payload)| (Some(RequestStreamFrame { stream_id, payload }), Some(rd)))
+                            .map(move |(rd, payload)| {
+                                let state = State {
+                                    frame_count: state.frame_count + 1,
+                                    total_payload_len: state.total_payload_len + payload.len() as u32,
+                                };
+                                (Some(RequestStreamFrame { stream_id, payload }),
+                                    Some((rd, state)))
+                            })
                             .into_box()
                     }
                 }))
@@ -180,7 +224,7 @@ fn read_sub_stream<R>(rd: R, timeout: Duration)
         .filter_map(|r| r)
 }
 
-fn write_stream(
+fn write_response_stream_frames(
     stream: impl Stream<Item=ResponseStreamFrame, Error=Error>,
     sock_id: SocketIdDebug,
     wr: impl AsyncWrite + Clone + Send + 'static,
@@ -196,7 +240,7 @@ fn write_stream(
                 Err(st) => format!("Status({:?})", st),
             });
         let hdr = ResponseStreamFrameHeader {
-            stream_id: stream_id,
+            stream_id,
             status: *payload.as_ref().err().unwrap_or(&Status::Ok) as i32,
         };
         write_pb_frame(wr.clone(), &hdr)

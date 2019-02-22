@@ -18,6 +18,10 @@ use crate::error::BoxFuture;
 
 use super::*;
 
+lazy_static::lazy_static! {
+    static ref CONN_POOL: ConnPoolHandle = ConnPool::new(Duration::from_secs(30));
+}
+
 struct Conns {
     vec: Vec<TcpStream>,
     pending: usize,
@@ -35,12 +39,12 @@ impl Conns {
 type ConnPoolHandle = Arc<Mutex<ConnPool>>;
 
 struct ConnPool {
-    connect_timeout: Option<Duration>,
+    connect_timeout: Duration,
     conns: HashMap<Endpoint, Conns>,
 }
 
 impl ConnPool {
-    pub fn new(connect_timeout: Option<Duration>) -> ConnPoolHandle {
+    pub fn new(connect_timeout: Duration) -> ConnPoolHandle {
         Arc::new(Mutex::new(Self {
             connect_timeout,
             conns: HashMap::new(),
@@ -76,7 +80,7 @@ impl ConnPool {
         })
     }
 
-    fn new_connection(endpoint: &Endpoint, timeout: Option<Duration>) -> BoxFuture<TcpStream> {
+    fn new_connection(endpoint: &Endpoint, timeout: Duration) -> BoxFuture<TcpStream> {
         let addr: IpAddr = match endpoint.host.parse() {
             Ok(v) => v,
             Err(e) => return future::err(e.wrap_id(ErrorId::Todo)).into_box(),
@@ -85,26 +89,17 @@ impl ConnPool {
             IpAddr::V4(a) => SocketAddr::V4(SocketAddrV4::new(a, endpoint.port)),
             IpAddr::V6(a) => SocketAddr::V6(SocketAddrV6::new(a, endpoint.port, 0, 0)),
         };
-        let f = future::lazy(move || {
-            if let Some(timeout) = timeout {
-                debug!("connecting to {} with timeout {}",
-                    sock_addr, humantime::format_duration(timeout));
-            } else {
-                debug!("connecting to {}", sock_addr);
-            }
+        future::lazy(move || {
+            debug!("connecting to {} with timeout {}",
+                sock_addr, humantime::format_duration(timeout));
             TcpStream::connect(&sock_addr)
-                .map_err(|e| e.wrap_id(ErrorId::Io))
+                .map_err(|e| -> Error { e.wrap_id(ErrorId::Io) })
                 .inspect(move |c| {
                     debug!("connected to {} (#{:?})", sock_addr, c.as_raw_fd());
                 })
-        });
-        if let Some(timeout) = timeout {
-            f.timeout(timeout)
+                .timeout(timeout)
                 .map_err(|e| e.wrap_id(ErrorId::Io))
-                .into_box()
-        } else {
-            f.into_box()
-        }
+        }).into_box()
     }
 }
 
@@ -184,13 +179,21 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn ask(&self, endpoint: Endpoint, req: Request)
+    pub fn into_endpoint_client(self, endpoint: Endpoint) -> EndpointClient {
+        EndpointClient {
+            client: self,
+            endpoint,
+        }
+    }
+
+    pub fn ask(&self, endpoint: Endpoint, request: impl Into<Request>)
         -> impl Future<Item=Response, Error=Error>
     {
         let conn = ConnPool::acquire(self.conn_pool.clone(), endpoint.clone());
         future::lazy(move || {
-            trace!("asking {:?} with {:#?}", endpoint, req);
-            conn.and_then(move |c| write_pb_frame(c, &req)
+            let request = request.into();
+            trace!("asking {:?} with {:#?}", endpoint, request);
+            conn.and_then(move |c| write_pb_frame(c, &request)
                     .map_err(|e| e.wrap_id(ErrorId::Io).with_context("sending request"))
                     .map(|(c, _)| c))
                 .and_then(|c| read_pb_frame::<rproto::Response, _>(c)
@@ -204,6 +207,14 @@ impl Client {
     }
 }
 
+impl Default for Client {
+    fn default() -> Self {
+        Self {
+            conn_pool: CONN_POOL.clone(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct EndpointClient {
     client: Client,
@@ -211,7 +222,11 @@ pub struct EndpointClient {
 }
 
 impl EndpointClient {
-    pub fn ask(&self, req: Request) -> impl Future<Item=Response, Error=Error> {
-        self.client.ask(self.endpoint.clone(), req)
+    pub fn default(endpoint: Endpoint) -> Self {
+        Client::default().into_endpoint_client(endpoint)
+    }
+
+    pub fn ask(&self, request: impl Into<Request>) -> impl Future<Item=Response, Error=Error> {
+        self.client.ask(self.endpoint.clone(), request)
     }
 }
