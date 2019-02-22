@@ -34,6 +34,7 @@ pub trait FutureExt: Future {
 
 impl<T: Future + Sized + Send + 'static> FutureExt for T {}
 
+#[derive(Clone)]
 pub struct MapAllUnit<T>(T);
 
 impl<T: Future> Future for MapAllUnit<T> {
