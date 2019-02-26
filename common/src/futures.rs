@@ -1,3 +1,4 @@
+pub mod condvar;
 pub mod signal;
 
 use futures::prelude::*;

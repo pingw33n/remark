@@ -18,13 +18,13 @@ mod root {
             use request::Request::*;
             if let Some(req) = &self.request {
                 match req {
-                    | AskVote(_)
-                    => false,
-
-                    | Pull(_)
-                    | PullMore(_)
                     | Push(_)
                     => true,
+
+                    | AskVote(_)
+                    | Pull(_)
+                    | PullMore(_)
+                    => false,
                 }
             } else {
                 false

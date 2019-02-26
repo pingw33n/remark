@@ -31,7 +31,7 @@ impl Default for Options {
         Self {
             sleep_on_error: Duration::from_millis(500),
             max_connections: 10000,
-            socket_timeout: Duration::from_secs(30000),
+            socket_timeout: Duration::from_millis(5000),
             max_frame_count: 1000,
             max_single_payload_len: 1024 * 1024,
             max_total_payload_len: u32::max_value(),

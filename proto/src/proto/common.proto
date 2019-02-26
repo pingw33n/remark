@@ -11,7 +11,6 @@ enum Status {
     BAD_PARTITION_ID    = 6;
     END_OF_STREAM       = 7;
     BAD_RAFT_CLUSTER_ID = 8;
-
 }
 
 message RequestStreamFrameHeader {
