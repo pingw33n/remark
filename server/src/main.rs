@@ -611,7 +611,7 @@ impl Stream for Cursor {
             let entry = Ok(tokio_threadpool::blocking(move || {
                 let mut iter = iter.lock();
                 let iter = iter.as_mut().unwrap();
-                 match iter.next() {
+                match iter.next() {
                     Some(Ok(entry)) => Some(iter.complete_read().map(|_| entry)),
                     v => v,
                 }
@@ -624,9 +624,12 @@ impl Stream for Cursor {
                         Some(()) => continue,
                         None => break Ok(Async::Ready(None)),
                     }
-                    break Ok(Async::NotReady)
                 },
-                Some(Err(e)) => break Err(Status::UnknownError), // FIXME
+                Some(Err(e)) => {
+                    error!("cursor failed: {:?}", e);
+                    *self.iter.lock() = Err(Status::UnknownError);
+                    break Err(Status::UnknownError); // FIXME
+                }
             };
             let buf = mem::replace(self.iter.lock().as_mut().unwrap().buf_mut(), Vec::new());
             break Ok(Async::Ready(Some((entry, buf))));
@@ -690,7 +693,6 @@ impl Stream for EntryResponseStream {
             if timed_out || limit_bytes_reached {
                 self.timeout = None;
                 if matches!(self.cursors[self.stream_id as usize], CursorState::Polling(_)) {
-                    all_done = false;
                     self.cursors[self.stream_id as usize] = CursorState::Done;
                     return Ok(Async::Ready(Some(ResponseStreamFrame {
                         stream_id: self.stream_id,
@@ -722,6 +724,7 @@ impl Stream for EntryResponseStream {
                             None
                         }
                         Err(e) => {
+                            error!("cursor {} failed: {:?}", self.stream_id, e);
                             Some(ResponseStreamFrame {
                                 stream_id: self.stream_id,
                                 payload: Err(Status::UnknownError),
