@@ -629,6 +629,27 @@ mod test {
     }
 
     #[test]
+    fn iter_tailing() {
+        let dir = mktemp::Temp::new_dir().unwrap();
+
+        let log = Log::open_or_create(&dir, Options {
+                max_segment_len: 1024,
+                ..Default::default()
+            }).unwrap();
+        let mut it = log.iter(..);
+        assert!(it.next().is_none());
+
+        for i in 1..=1024 {
+            let (mut e, mut buf) = BufEntryBuilder::from(
+                MessageBuilder { id: Some(Id::new(i * 10)), ..Default::default() }).build();
+            log.push(&mut e, &mut buf, Push { dense: false, ..Default::default() }).unwrap();
+            assert_eq!(it.next().unwrap().unwrap().start_id(), Id::new(i * 10));
+        }
+
+        assert!(log.inner.lock().segments.len() > 1);
+    }
+
+    #[test]
     fn reopen() {
         let dir = mktemp::Temp::new_dir().unwrap();
         {
