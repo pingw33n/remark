@@ -232,7 +232,7 @@ fn write_response_stream_frames(
     stream: impl Stream<Item=ResponseStreamFrame, Error=Error>,
     sock_id: SocketIdDebug,
     wr: impl AsyncWrite + Clone + Send + 'static,
-    write_timeout: Duration,
+    timeout: Duration,
 ) -> impl Future<Item=(), Error=()>
 {
     stream.for_each(move |ResponseStreamFrame { stream_id, payload }| {
@@ -248,11 +248,12 @@ fn write_response_stream_frames(
             status: *payload.as_ref().err().unwrap_or(&Status::Ok) as i32,
         };
         write_pb_frame(wr.clone(), &hdr)
-            .timeout(write_timeout)
+            .timeout(timeout)
             .map_err(|e| e.wrap_id(ErrorId::Io).with_context("writing response stream frame header"))
             .and_then(move |(wr, _)| {
                 if let Ok(buf) = payload {
                     tokio::io::write_all(wr, buf)
+                        .timeout(timeout)
                         .map_err(|e| e.wrap_id(ErrorId::Io).with_context("writing response stream frame payload"))
                         .map(|_| {})
                         .into_box()
