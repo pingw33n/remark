@@ -252,7 +252,7 @@ impl Segment {
 
         let (next_id, last_pos) = {
             let id = Self::local_to_global_id0(start_id, id_index.last_key().unwrap_or(0));
-            let mut it = Self::iter0(&file, start_id, Id::max_value(), &id_index, id..);
+            let mut it = Self::iter0(&file, start_id, &id_index, id..);
             let mut last_id = None;
             for entry in &mut it {
                 let entry = entry?;
@@ -281,7 +281,7 @@ impl Segment {
             let (mut max_timestamp, lid) = timestamp_index.last_entry()
                 .unwrap_or((Timestamp::min_value(), 0));
             let id = Self::local_to_global_id0(start_id, lid);
-            let it = Self::iter0(&file, start_id, Id::max_value(), &id_index, id..);
+            let it = Self::iter0(&file, start_id, &id_index, id..);
             for entry in it {
                 let entry = entry?;
                 if entry.max_timestamp() > max_timestamp {
@@ -425,10 +425,10 @@ impl Segment {
     }
 
     pub fn iter(&self, range: impl RangeBounds<Id>) -> Iter {
-        Self::iter0(&self.file, self.start_id, self.next_id, &self.id_index, range)
+        Self::iter0(&self.file, self.start_id, &self.id_index, range)
     }
 
-    fn iter0(file: &Arc<SegFile>, seg_start_id: Id, next_id: Id, id_index: &IdIndex,
+    fn iter0(file: &Arc<SegFile>, seg_start_id: Id, id_index: &IdIndex,
             range: impl RangeBounds<Id>) -> Iter {
         let start_id = match range.start_bound() {
             Bound::Excluded(_) => unreachable!(),
@@ -448,7 +448,7 @@ impl Segment {
         };
 
         let (start_pos, force_eof) = if end_id_excl > start_id &&
-                start_id < next_id && end_id_excl > seg_start_id {
+                end_id_excl > seg_start_id {
             let start_id = cmp::max(start_id, seg_start_id);
             let local_id = Self::global_to_local_id0(seg_start_id, start_id);
             (id_index.value_by_key(local_id)
@@ -736,6 +736,34 @@ mod test {
             assert_eq!(e.start_id(), Id::new(102));
             assert_eq!(e.iter(it.buf()).count(), 1);
         }
+    }
+
+    #[test]
+    fn iter_tailing() {
+        let dir = mktemp::Temp::new_dir().unwrap();
+        let mut seg = Segment::create_new(&dir, Id::new(100), Timestamp::min_value(),
+            Default::default()).unwrap();
+
+        let mut it = seg.iter(Id::new(120)..);
+        assert!(it.next().is_none());
+
+        let (mut e, mut buf) = BufEntryBuilder::from(
+            MessageBuilder { id: Some(Id::new(110)), ..Default::default() }).build();
+        seg.push(&mut e, &mut buf, Push { dense: false, ..Default::default() }).unwrap();
+
+        // Skips 110, since the iter starts at 120.
+        assert!(it.next().is_none());
+
+        let (mut e, mut buf) = BufEntryBuilder::from(
+            MessageBuilder { id: Some(Id::new(120)), ..Default::default() }).build();
+        seg.push(&mut e, &mut buf, Push { dense: false, ..Default::default() }).unwrap();
+
+        let (mut e, mut buf) = BufEntryBuilder::from(
+            MessageBuilder { id: Some(Id::new(130)), ..Default::default() }).build();
+        seg.push(&mut e, &mut buf, Push { dense: false, ..Default::default() }).unwrap();
+
+        assert_eq!(it.next().unwrap().unwrap().start_id(), Id::new(120));
+        assert_eq!(it.next().unwrap().unwrap().start_id(), Id::new(130));
     }
 
     #[test]
