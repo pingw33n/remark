@@ -1,17 +1,25 @@
+use enum_kinds::EnumKind;
+use futures::stream::FuturesUnordered;
 use log::*;
+use std::sync::Arc;
 use std::time::Instant;
-
-use rlog::message::Id;
+use parking_lot::Mutex;
 use tokio::prelude::*;
 
-use crate::error::*;
+use rcommon::clone;
+use rlog::message::Id;
+use rproto::common::Status;
+
 use crate::rpc::client::EndpointClient;
+use std::time::Duration;
 
 struct Candidate {
     timestamp: Instant,
-    vote_count: usize,
+    votes_from: Vec<u32>,
 }
 
+#[derive(EnumKind)]
+#[enum_kind(StateKind)]
 enum State {
     Idle,
     Candidate(Candidate),
@@ -20,6 +28,20 @@ enum State {
 }
 
 impl State {
+    pub fn kind(&self) -> StateKind {
+        self.into()
+    }
+}
+
+impl State {
+    pub fn as_candidate(&self) -> Option<&Candidate> {
+        if let State::Candidate(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
+
     pub fn as_candidate_mut(&mut self) -> Option<&mut Candidate> {
         if let State::Candidate(v) = self {
             Some(v)
@@ -29,6 +51,8 @@ impl State {
     }
 }
 
+pub type ClusterHandle = Arc<Mutex<Cluster>>;
+
 struct Node {
     id: u32,
     client: EndpointClient,
@@ -36,6 +60,7 @@ struct Node {
 }
 
 pub struct Cluster {
+    election_timeout: Duration,
     state: State,
     node_id: u32,
 
@@ -53,9 +78,9 @@ pub struct Cluster {
 
 impl Cluster {
     pub fn new(node_id: u32, last_entry: Option<(Id, u64)>,
-        topic_id: String, partition_id: u32) -> Self
+        topic_id: String, partition_id: u32, election_timeout: Duration) -> ClusterHandle
     {
-        Self {
+        Arc::new(Mutex::new(Self {
             state: State::Idle,
             node_id,
             term: 0,
@@ -65,74 +90,131 @@ impl Cluster {
             nodes: Vec::new(),
             topic_id,
             partition_id,
-        }
+            election_timeout,
+        }))
     }
 
     pub fn add_node(&mut self, id: u32, client: EndpointClient) {
         self.nodes.push(Node { id, client, last_activity: Instant::now() });
     }
 
-    pub fn start_election(&mut self) {
-        self.term += 1;
-        self.state = State::Candidate(Candidate {
-            timestamp: Instant::now(),
-            vote_count: 1,
-        });
-
+    pub fn start_election(this: &ClusterHandle) {
         use rproto::ask_vote::*;
+        let (futs, election_timeout) = {
+            let mut this = this.lock();
 
-        let majority_count = self.nodes.len() / 2 + 1;
+            assert!(this.nodes.len() >= 1);
+            debug_assert_eq!(this.nodes.iter().filter(|n| n.id == this.node_id).count(), 1);
 
-        for node in &self.nodes {
-            if node.id != self.node_id {
-                let resp: Result<rproto::Response> = node.client.ask(
+            this.term += 1;
+
+            if this.nodes.len() == 1 {
+                info!("[{}] becoming leader for term {} without election \
+                    because it's the only node in the cluster",
+                    this.node_id, this.term);
+                this.state = State::Leader;
+                return;
+            }
+
+            this.state = State::Candidate(Candidate {
+                timestamp: Instant::now(),
+                votes_from: vec![this.node_id],
+            });
+
+            let mut futs = FuturesUnordered::new();
+            for node in &this.nodes {
+                let node_id = node.id;
+                let this_node_id = this.node_id;
+                if node_id == this_node_id {
+                    continue;
+                }
+                let f = node.client.ask(
                     Request {
-                        term: self.term,
-                        node_id: self.node_id,
-                        last_entry: self.last_entry.map(|(id, term)| request::Entry {
+                        term: this.term,
+                        node_id: this_node_id,
+                        last_entry: this.last_entry.map(|(id, term)| request::Entry {
                             id: id.get(),
                             term,
                         }),
-                        topic_id: self.topic_id.clone(),
-                        partition_id: self.partition_id,
-                    }).wait();
-                match resp {
-                    Ok(resp) => {
-                        if let rproto::response::Response::AskVote(resp) = resp.response.unwrap() {
-                            if resp.common.unwrap().status == rproto::common::Status::Ok.into() {
-                                if resp.term > self.term {
-                                    self.term = resp.term;
-                                    self.state = State::Follower;
-                                    debug!("saw a higher term, becoming a follower: {} -> {}",
-                                        self.term, resp.term);
-                                    break;
-                                }
-                                if resp.vote_granted {
-                                    let vote_count = &mut self.state.as_candidate_mut().unwrap().vote_count;
-                                    *vote_count += 1;
-                                    debug!("vote granted, have {} vote(s) now", *vote_count);
-                                    if *vote_count >= majority_count {
-                                        break;
-                                    }
-                                } else {
-                                    debug!("vote not granted");
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        dbg!(e);
-                    }
+                        topic_id: this.topic_id.clone(),
+                        partition_id: this.partition_id,
+                    })
+                    .map_err(move |e| warn!("[{}] AskVote RPC to {} failed: {:?}", this_node_id, node_id, e))
+                    .map(move |resp| (node_id, resp));
+                futs.push(f);
+            }
+            (futs, this.election_timeout)
+        };
+
+        fn maybe_retry(this: &ClusterHandle) {
+            let retry = {
+                let this = this.lock();
+                if this.state.kind() == StateKind::Candidate {
+                    debug!("[{}] election term {} timed out, starting a new one",
+                        this.node_id, this.term);
+                    true
+                } else {
+                    false
                 }
+            };
+            if retry {
+                Cluster::start_election(&this);
             }
         }
 
-        let vote_count = self.state.as_candidate_mut().unwrap().vote_count;
-        if vote_count >= majority_count {
-            debug!("got majority of votes {} of {}, becoming leader for term {}",
-                vote_count, self.nodes.len(), self.term);
-            self.state = State::Leader;
-        }
+        let fut = futs
+            .take_while(clone!(this => move |_| Ok(this.lock().state.kind() == StateKind::Candidate)))
+            .for_each(clone!(this => move |(node_id, resp)| {
+                let mut this = this.lock();
+                let resp = if let rproto::response::Response::AskVote(v) = resp.response.unwrap() {
+                    v
+                } else {
+                    warn!("[{}] invalid AskVote response from {}", this.node_id, node_id);
+                    return Ok(());
+                };
+                if this.state.kind() != StateKind::Candidate {
+                    debug!("[{}] ignoring AskVote response from {} since this node is no longer in Candidate state",
+                        this.node_id, node_id);
+                }
+                let status = resp.common.unwrap().status;
+                if status != Status::Ok.into() {
+                    warn!("[{}] got non-Ok AskVote response from {}: {} ({:?})",
+                        this.node_id, node_id, status, Status::from_i32(status));
+                }
+                if resp.term > this.term {
+                    debug!("[{}] saw a higher term, becoming a follower: {} -> {}",
+                        this.node_id, this.term, resp.term);
+                    this.term = resp.term;
+                    this.state = State::Follower;
+                    return Ok(());
+                } else if resp.term < this.term {
+                    debug!("[{}] ignoring AskVote response from previous term {} < {}",
+                        this.node_id, resp.term, this.term);
+                    return Ok(());
+                }
+                if resp.vote_granted {
+                    let vote_count = {
+                        let votes_from = &mut this.state.as_candidate_mut().unwrap().votes_from;
+                        votes_from.push(node_id);
+                        votes_from.len()
+                    };
+                    debug!("[{}] vote received from {}, now have votes from {:?}",
+                        this.node_id, node_id, this.state.as_candidate().unwrap().votes_from);
+                    let majority_count = this.nodes.len() / 2 + 1;
+                    if vote_count >= majority_count {
+                        info!("[{}] becoming leader for term {} due to votes majority {} from {:?}",
+                            this.node_id, this.term, vote_count,
+                            this.state.as_candidate().unwrap().votes_from);
+                        this.state = State::Leader;
+                    }
+                } else {
+                    debug!("[{}] {} didn't grant the vote", this.node_id, node_id);
+                }
+                Ok(())
+            }))
+            .timeout(election_timeout)
+            .map_err(clone!(this => move |_| maybe_retry(&this)));
+        tokio::spawn(fut);
     }
 
     pub fn ask_vote(&mut self, request: &rproto::ask_vote::Request) -> rproto::ask_vote::Response {

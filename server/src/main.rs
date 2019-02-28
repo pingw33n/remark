@@ -52,6 +52,7 @@ use matches::matches;
 use rcommon::futures::condvar::Condvar;
 use std::time::Duration;
 use rcommon::futures::StreamExt;
+use rand::Rng;
 
 #[global_allocator]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
@@ -316,7 +317,7 @@ struct Node {
     store: Store,
     id: u32,
     cluster_ctrl: Option<ClusterController>,
-    raft_clusters: HashMap<(String, u32), raft::Cluster>,
+    raft_clusters: HashMap<(String, u32), raft::ClusterHandle>,
     push_notify: Condvar,
 }
 
@@ -387,10 +388,11 @@ impl Node {
                         .expect("FIXME")
                         .map(|e| (e.start_id(), e.term()));
                     debug!("creating raft cluster with last_entry={:?}", last_entry);
-                    let mut rc = raft::Cluster::new(my_id, last_entry, tm.id.clone(), pm.id);
+                    let rc = raft::Cluster::new(my_id, last_entry, tm.id.clone(), pm.id,
+                        Duration::from_millis(rand::thread_rng().gen_range(1500, 3000)));
                     for nid in &pm.nodes {
                         if let Some(node) = cluster_meta.nodes.get(&nid) {
-                            rc.add_node(node.id, EndpointClient::default(Endpoint {
+                            rc.lock().add_node(node.id, EndpointClient::default(Endpoint {
                                 host: node.host.clone(),
                                 port: node.system_port,
                             }));
@@ -457,12 +459,18 @@ impl Node {
 
     pub fn ask_vote(&mut self, req: rproto::ask_vote::Request) -> rproto::ask_vote::Response {
         if let Some(rc) = self.raft_clusters.get_mut(&(req.topic_id.clone(), req.partition_id)) {
-            rc.ask_vote(&req)
+            rc.lock().ask_vote(&req)
         } else {
             rproto::ask_vote::Response {
                 common: Some(rproto::common::Response { status: Status::BadRaftClusterId.into() }),
                 ..Default::default()
             }
+        }
+    }
+
+    pub fn start_election(&mut self) {
+        for cluster in self.raft_clusters.values() {
+            raft::Cluster::start_election(cluster);
         }
     }
 }
@@ -822,25 +830,36 @@ fn main() {
         .map_all_unit()
         .shared();
 
-    tokio::run(rpc::server::serve("0.0.0.0:4820".parse().unwrap(),
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+
+    rt.spawn(rpc::server::serve("0.0.0.0:4820".parse().unwrap(),
         Default::default(),
         shutdown_rx.clone().map_all_unit(),
         || Ok(Context { cursors: Vec::new() }),
         clone!(node => move |ctx: &mut Context, req: Request, stream| {
+            use rproto::request::Request::*;
             match req.request.unwrap() {
-                rproto::request::Request::Push(req) => {
+                Push(req) => {
                     handle_push_request(req, stream, node.clone()).into_box()
                 }
-                rproto::request::Request::Pull(req) => {
+                Pull(req) => {
                     handle_pull_request(req, &mut ctx.cursors, node.clone()).into_box()
                 }
-                rproto::request::Request::PullMore(req) => {
+                PullMore(req) => {
                     handle_pull_more_request(req, &ctx.cursors).into_box()
                 }
-                _ => unimplemented!(),
+                AskVote(req) => {
+                    future::ok(HandlerResult::new(node.write().ask_vote(req))).into_box()
+                }
             }
 
         }))
         .map_all_unit()
     );
+
+    rt.spawn(future::lazy(clone!(node => move || { node.write().start_election(); Ok(()) })));
+
+    rt.shutdown_on_idle().wait().unwrap();
+
+    info!("app shut down");
 }
